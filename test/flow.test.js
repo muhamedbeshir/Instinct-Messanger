@@ -10,6 +10,7 @@ import { registerJobs } from '../src/server.js';
 import { startWorker, stopWorker, drain, enqueueReply } from '../src/queue.js';
 import { findOrCreateConversation, addMessage, listMessages, getConversation } from '../src/conversations.js';
 import { hydrateAll } from '../src/db.js';
+import { setPlatformSettings } from '../src/platform.js';
 
 registerJobs();
 
@@ -66,7 +67,7 @@ async function say(conv, text) {
 
 test('محادثة كاملة: بحث ← مقاس ← بيانات ← ملخص ← تأكيد ← أوردر', async () => {
   startWorker();
-  updateSettings({ bot: { debounce_ms: 0 }, ai: { provider: 'mock' } });
+  updateSettings({ bot: { debounce_ms: 0 } }); setPlatformSettings({ ai: { provider: 'mock' } });
   const conv = findOrCreateConversation('simulator', 't1', 'اختبار');
   assert.match(await say(conv, 'سلام عليكم'), /أهلاً/);
   assert.match(await say(conv, 'عايز حذاء رياضي'), /900/);

@@ -1,19 +1,12 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { DATA_DIR } from './config.js';
+import { currentTenantId, runInTenant, tenantDir } from './tenancy.js';
 import { parseJSON, deepMerge, clone, isPlainObject, randomToken } from './util.js';
 import { DEFAULT_SETTINGS, DEFAULT_GOVERNORATES, DEFAULT_MODES, DEFAULT_DISCOUNTS } from './defaults.js';
 
-export const db = new DatabaseSync(path.join(DATA_DIR, 'app.db'));
-db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
-
-export const q = {
-  all: (sql, ...p) => db.prepare(sql).all(...p),
-  get: (sql, ...p) => db.prepare(sql).get(...p),
-  run: (sql, ...p) => db.prepare(sql).run(...p),
-};
-
-db.exec(`
+/* ============ قاعدة بيانات لكل عميل (tenant) ============ */
+const SCHEMA = `
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS categories (
@@ -190,11 +183,42 @@ CREATE TABLE IF NOT EXISTS logs (
   level TEXT, scope TEXT, message TEXT, extra TEXT, created_at INTEGER
 );
 
-CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, expires_at INTEGER NOT NULL);
-`);
+`;
 
-/* ---------------- الإعدادات ---------------- */
-let cache = null;
+const dbs = new Map();
+export function openTenantDb(id) {
+  id = Number(id);
+  let d = dbs.get(id);
+  if (d) return d;
+  fs.mkdirSync(tenantDir(id), { recursive: true });
+  d = new DatabaseSync(path.join(tenantDir(id), 'app.db'));
+  d.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
+  d.exec(SCHEMA);
+  dbs.set(id, d);
+  runInTenant(id, seedDefaults);
+  return d;
+}
+export function closeTenantDb(id) {
+  const d = dbs.get(Number(id));
+  if (d) { try { d.close(); } catch { /* */ } dbs.delete(Number(id)); }
+  caches.delete(Number(id));
+}
+export function tenantDb() {
+  const id = currentTenantId();
+  if (id == null) throw new Error('no tenant context (الكود ده لازم يشتغل جوه runInTenant)');
+  return openTenantDb(id);
+}
+/** الـ db اللي كل الكود بيستخدمه: بيشاور تلقائيًا على قاعدة العميل الحالي */
+export const db = new Proxy({}, { get: (_, p) => { const d = tenantDb(); const v = d[p]; return typeof v === 'function' ? v.bind(d) : v; } });
+
+export const q = {
+  all: (sql, ...p) => db.prepare(sql).all(...p),
+  get: (sql, ...p) => db.prepare(sql).get(...p),
+  run: (sql, ...p) => db.prepare(sql).run(...p),
+};
+
+/* ---------------- الإعدادات (مخزّنة لكل عميل) ---------------- */
+const caches = new Map();
 function loadSettings() {
   const merged = clone(DEFAULT_SETTINGS);
   for (const row of q.all('SELECT key, value FROM settings')) {
@@ -203,7 +227,11 @@ function loadSettings() {
   }
   return merged;
 }
-export function getSettings() { if (!cache) cache = loadSettings(); return cache; }
+export function getSettings() {
+  const id = currentTenantId();
+  if (!caches.has(id)) caches.set(id, loadSettings());
+  return caches.get(id);
+}
 export function getSetting(pathStr, fallback) {
   let cur = getSettings();
   for (const p of pathStr.split('.')) { if (cur == null) return fallback; cur = cur[p]; }
@@ -219,7 +247,7 @@ export function updateSettings(patch) {
     const next = isPlainObject(base) && isPlainObject(v) ? deepMerge(base, v) : v;
     q.run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', k, JSON.stringify(next));
   }
-  cache = null;
+  caches.delete(currentTenantId());
   return getSettings();
 }
 export function getRaw(key, fallback = null) {
@@ -228,10 +256,10 @@ export function getRaw(key, fallback = null) {
 }
 export function setRaw(key, value) {
   q.run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', key, JSON.stringify(value));
-  cache = null;
+  caches.delete(currentTenantId());
 }
 
-/* ---------------- بيانات افتراضية (أول تشغيل) ---------------- */
+/* ---------------- بيانات افتراضية لكل عميل جديد ---------------- */
 export function seedDefaults() {
   if (!getRaw('_seeded')) {
     const dp = getSettings().shipping.default_price;
@@ -255,7 +283,6 @@ export function seedDefaults() {
     updateSettings({ channels: { verify_code: 'im_' + randomToken(6) } });
   }
 }
-seedDefaults();
 
 /* ---------------- مساعدات صفوف ---------------- */
 export const JSON_COLS = {

@@ -6,6 +6,9 @@ import { findOrCreateCategory, invalidateProducts } from './catalog.js';
 import { normalizeAr, toLatinDigits, now, parseJSON } from './util.js';
 import { normalizeImageUrl } from './images.js';
 import * as logger from './logger.js';
+import { runInTenant } from './tenancy.js';
+import { allTenantIds, tenantInfo, hasFeature } from './platform.js';
+import { productLimitLeft } from './catalog.js';
 
 /* ---------------- قراءة CSV ---------------- */
 export function parseCsv(text) {
@@ -155,6 +158,7 @@ export function applyImport(source, table) {
         q.run(`UPDATE products SET sku=?, category_id=?, name=?, description=?, price=?, compare_price=?, stock=?, images=?, attributes=?, notes=?, active=?, updated_at=? WHERE id=?`, ...values.slice(0, 9), notes, active, now(), existing.id);
         stats.updated++;
       } else {
+        if (productLimitLeft() <= 0) { stats.skipped++; if (!stats.limit_reached) { stats.limit_reached = true; stats.errors.push('وصلت للحد الأقصى من المنتجات في باقتك، باقي الصفوف اتجاهلت. رقّي الباقة.'); } return; }
         q.run(`INSERT INTO products(sku,category_id,name,description,price,compare_price,stock,images,attributes,notes,active,updated_at,source_id,source_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, ...values, source.id, key);
         stats.created++;
       }
@@ -193,10 +197,16 @@ export async function syncSource(id) {
 
 export function startSourceScheduler() {
   const t = setInterval(async () => {
-    for (const s of q.all('SELECT * FROM sources WHERE active=1 AND sync_minutes>0')) {
-      if (now() - s.last_sync >= s.sync_minutes * 60000) {
-        try { await syncSource(s.id); } catch (e) { logger.warn('import', `مزامنة ${s.name}: ${e.message}`); }
-      }
+    for (const tid of allTenantIds()) {
+      const info = tenantInfo(tid);
+      if (info.status !== 'active' || !hasFeature(info, 'auto_sync')) continue;
+      await runInTenant(tid, async () => {
+        for (const s of q.all('SELECT * FROM sources WHERE active=1 AND sync_minutes>0')) {
+          if (now() - s.last_sync >= s.sync_minutes * 60000) {
+            try { await syncSource(s.id); } catch (e) { logger.warn('import', `مزامنة ${s.name}: ${e.message}`); }
+          }
+        }
+      });
     }
   }, 60000);
   t.unref();

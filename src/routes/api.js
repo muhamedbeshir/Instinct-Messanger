@@ -3,8 +3,11 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import express from 'express';
 import { q, db, getSettings, updateSettings, hydrate, hydrateAll, getSetting } from '../db.js';
-import { UPLOAD_DIR, INBOUND_DIR, IMPORT_DIR } from '../config.js';
+import { uploadDir, inboundDir, importDir, currentTenantId } from '../tenancy.js';
+import { redactSettings, stripHiddenPatch, publicMessage } from '../visibility.js';
+import { tenantInfo, limitOf, hasFeature, getPlatformSettings, tenantBySlug, track, pq, usageOf } from '../platform.js';
 import * as auth from '../auth.js';
+import { account } from './account.js';
 import { bus, emit } from '../events.js';
 import { isPlainObject, now, parseJSON } from '../util.js';
 import { listCategories, getProduct, saveProduct, invalidateProducts } from '../catalog.js';
@@ -22,29 +25,10 @@ import { DEFAULT_SETTINGS } from '../defaults.js';
 
 export const api = express.Router();
 
-/* ---------------- مصادقة ---------------- */
-api.get('/auth/status', (req, res) => res.json({ setup: auth.isSetup(), authed: auth.isAuthed(req) }));
-api.post('/auth/setup', (req, res) => {
-  if (auth.isSetup()) return res.status(400).json({ error: 'الباسورد متضبط بالفعل' });
-  try { auth.setPassword(req.body.password); } catch (e) { return res.status(400).json({ error: e.message }); }
-  auth.setCookie(res, auth.createSession()); res.json({ ok: true });
-});
-api.post('/auth/login', (req, res) => {
-  const ip = req.ip;
-  if (!auth.loginAllowed(ip)) return res.status(429).json({ error: 'محاولات كتير. جرّب بعد شوية.' });
-  const ok = auth.checkPassword(req.body.password || '');
-  auth.recordAttempt(ip, ok);
-  if (!ok) return res.status(401).json({ error: 'الباسورد غلط' });
-  auth.setCookie(res, auth.createSession()); res.json({ ok: true });
-});
-api.post('/auth/logout', (req, res) => { const t = auth.currentToken(req); if (t) auth.destroySession(t); auth.clearCookie(res); res.json({ ok: true }); });
-
-api.use(auth.requireAuth);
-
-api.post('/auth/change', (req, res) => {
-  if (!auth.checkPassword(req.body.current || '')) return res.status(401).json({ error: 'الباسورد الحالي غلط' });
-  try { auth.setPassword(req.body.password); res.json({ ok: true }); } catch (e) { res.status(400).json({ error: e.message }); }
-});
+/* كل الراوترات هنا جوه سياق عميل (requireTenantUser بيحدد القاعدة والصلاحيات) */
+api.use(auth.requireTenantUser);
+const isAdminView = (req) => Boolean(req.auth?.platformAdmin);
+api.use(account);
 
 /* ---------------- الإعدادات ---------------- */
 const SECRET = /(token|secret|api_key|password)$/;
@@ -63,13 +47,24 @@ function unmask(v) {
   return out;
 }
 api.get('/settings', (req, res) => {
-  const s = getSettings(); const out = {};
-  for (const k of Object.keys(DEFAULT_SETTINGS)) out[k] = s[k];
-  res.json(mask(out));
+  const st = getSettings(); const out = {};
+  for (const k of Object.keys(DEFAULT_SETTINGS)) out[k] = st[k];
+  res.json(mask(redactSettings(out, req.tenant, isAdminView(req))));
 });
 api.put('/settings', (req, res) => {
+  if (req.auth.role !== 'owner') return res.status(403).json({ error: 'الصلاحية دي للمالك فقط' });
   const patch = {};
-  for (const [k, v] of Object.entries(unmask(req.body || {}))) if (k in DEFAULT_SETTINGS) patch[k] = v;
+  const clean = stripHiddenPatch(unmask(req.body || {}), req.tenant, isAdminView(req));
+  for (const [k, v] of Object.entries(clean)) if (k in DEFAULT_SETTINGS) patch[k] = v;
+  // حدود الباقة: عدد القنوات المفعّلة
+  if (patch.channels) {
+    const cur = getSettings().channels; const next = { ...cur, ...patch.channels };
+    const on = ['messenger', 'instagram', 'whatsapp'].filter((c) => (patch.channels[c]?.enabled ?? cur[c].enabled));
+    const lim = limitOf(req.tenant, 'channels');
+    if (lim >= 0 && on.length > lim) return res.status(402).json({ error: `باقتك بتسمح بـ ${lim} قناة بس. رقّي الباقة لتفعيل المزيد.` });
+    for (const c of ['instagram', 'whatsapp']) if (patch.channels[c]?.enabled && !hasFeature(req.tenant, c)) return res.status(402).json({ error: 'القناة دي مش متاحة في باقتك.' });
+    void next;
+  }
   updateSettings(patch);
   invalidateProducts();
   res.json({ ok: true });
@@ -152,11 +147,11 @@ api.post('/upload', rawBody, (req, res) => {
   const ext = path.extname(safeName(req.query.name)).toLowerCase();
   if (!['.jpg', '.jpeg', '.png', '.webp', '.gif'].includes(ext)) return res.status(400).json({ error: 'الصور بس (jpg, png, webp, gif)' });
   const name = `${crypto.randomUUID()}${ext}`;
-  fs.writeFileSync(path.join(UPLOAD_DIR, name), req.body);
-  res.json({ url: `/media/${name}` });
+  fs.writeFileSync(path.join(uploadDir(), name), req.body);
+  res.json({ url: `/media/${currentTenantId()}/${name}` });
 });
 api.get('/inbound/:file', (req, res) => {
-  const f = path.join(INBOUND_DIR, path.basename(req.params.file));
+  const f = path.join(inboundDir(), path.basename(req.params.file));
   fs.existsSync(f) ? res.type(mimeFromName(f)).sendFile(f) : res.status(404).end();
 });
 
@@ -185,7 +180,7 @@ api.post('/sources/:id/file', rawBody, (req, res) => {
   if (!s) return res.status(404).json({ error: 'المصدر مش موجود' });
   const ext = path.extname(safeName(req.query.name)).toLowerCase() || '.csv';
   if (!['.csv', '.xlsx'].includes(ext)) return res.status(400).json({ error: 'CSV أو XLSX بس' });
-  const file = path.join(IMPORT_DIR, `source-${s.id}${ext}`);
+  const file = path.join(importDir(), `source-${s.id}${ext}`);
   fs.writeFileSync(file, req.body);
   q.run('UPDATE sources SET file_path=? WHERE id=?', file, s.id);
   res.json({ ok: true });
@@ -221,7 +216,7 @@ api.get('/conversations/:id', (req, res) => {
   const c = getConversation(req.params.id);
   if (!c) return res.status(404).json({ error: 'مش موجودة' });
   q.run('UPDATE conversations SET unread=0 WHERE id=?', c.id);
-  res.json({ conversation: { ...c, bot_active: !botIsPausedFor(c) }, messages: listMessages(c.id), unanswered: q.all(`SELECT * FROM unanswered WHERE conversation_id=? AND status='open'`, c.id) });
+  res.json({ conversation: { ...c, bot_active: !botIsPausedFor(c) }, messages: listMessages(c.id).map((m) => publicMessage(m, isAdminView(req))), unanswered: q.all(`SELECT * FROM unanswered WHERE conversation_id=? AND status='open'`, c.id) });
 });
 api.post('/conversations/:id/send', async (req, res) => {
   const c = getConversation(req.params.id);
@@ -261,6 +256,7 @@ api.post('/sim/message', (req, res) => {
   if (!text && !atts.length) return res.status(400).json({ error: 'اكتب رسالة' });
   addMessage(conv.id, { direction: 'in', sender: 'customer', text, attachments: atts, external_id: null });
   saveConversation(conv.id, { bot_paused: 0, paused_until: 0 });
+  track({ messages_in: 1 });
   enqueueReply(conv.id, 200);
   res.json({ conversation_id: conv.id });
 });
@@ -268,7 +264,7 @@ api.post('/sim/upload', rawBody, (req, res) => {
   const ext = path.extname(safeName(req.query.name)).toLowerCase();
   if (!['.jpg', '.jpeg', '.png', '.webp', '.gif'].includes(ext)) return res.status(400).json({ error: 'صور بس' });
   const name = `${crypto.randomUUID()}${ext}`;
-  fs.writeFileSync(path.join(INBOUND_DIR, name), req.body);
+  fs.writeFileSync(path.join(inboundDir(), name), req.body);
   res.json({ file: name });
 });
 api.post('/sim/reset', (req, res) => {
@@ -279,8 +275,9 @@ api.post('/sim/reset', (req, res) => {
 });
 api.get('/prompt-preview', (req, res) => {
   const conv = findOrCreateConversation('simulator', 'preview', 'معاينة');
-  const { stable, dynamic, mode } = buildSystem(conv, String(req.query.q || ''));
-  res.json({ prompt: `${stable}\n\n${dynamic}`, mode: mode.name, provider: providerName() });
+  const admin = isAdminView(req);
+  const { stable, dynamic, mode } = buildSystem(conv, String(req.query.q || ''), { redact: !admin });
+  res.json({ prompt: `${stable}\n\n${dynamic}`, mode: mode.name, ...(admin ? { provider: providerName() } : {}) });
 });
 
 /* ---------------- الأوردرات ---------------- */
@@ -326,20 +323,24 @@ api.get('/overview', (req, res) => {
   });
 });
 api.get('/health', (req, res) => {
-  const s = getSettings();
-  const ch = (k) => ({ enabled: Boolean(s.channels[k].enabled), configured: Boolean(s.channels[k].page_access_token || s.channels[k].access_token) });
-  res.json({
-    ok: true, uptime_s: Math.round(process.uptime()), provider: providerName(), model: s.ai.model, queue: queueStats(),
-    channels: { messenger: ch('messenger'), instagram: ch('instagram'), whatsapp: { ...ch('whatsapp'), configured: Boolean(s.channels.whatsapp.access_token && s.channels.whatsapp.phone_number_id) } },
-    webhook_signature_check: Boolean(s.channels.app_secret), public_base_url: s.channels.public_base_url || null,
+  const st = getSettings();
+  const ch = (k) => ({ enabled: Boolean(st.channels[k].enabled), configured: Boolean(st.channels[k].page_access_token || st.channels[k].access_token) });
+  const base = {
+    ok: true,
+    channels: { messenger: ch('messenger'), instagram: ch('instagram'), whatsapp: { ...ch('whatsapp'), configured: Boolean(st.channels.whatsapp.access_token && st.channels.whatsapp.phone_number_id) } },
+    webhook_signature_check: Boolean(st.channels.app_secret),
     failed_messages: q.get(`SELECT COUNT(*) AS n FROM messages WHERE status='failed'`).n,
-    recent_errors: q.all(`SELECT * FROM logs WHERE level IN ('error','warn') ORDER BY id DESC LIMIT 30`),
-  });
+    queue_pending: queueStats().pending,
+    bot_enabled: Boolean(st.bot.enabled), status: req.tenant.status,
+  };
+  if (!isAdminView(req)) return res.json(base); // العميل ما يشوفش المشغّل/الموديل/الأخطاء الداخلية
+  res.json({ ...base, uptime_s: Math.round(process.uptime()), provider: providerName(), model: getPlatformSettings().ai.model, queue: queueStats(), recent_errors: q.all(`SELECT * FROM logs WHERE level IN ('error','warn') ORDER BY id DESC LIMIT 30`) });
 });
-api.get('/logs', (req, res) => res.json(q.all('SELECT * FROM logs ORDER BY id DESC LIMIT 200')));
+api.get('/logs', (req, res) => (isAdminView(req) ? res.json(q.all('SELECT * FROM logs ORDER BY id DESC LIMIT 200')) : res.status(403).json({ error: 'غير مصرّح' })));
 api.get('/channels/info', (req, res) => {
-  const base = String(getSetting('channels.public_base_url') || '').replace(/\/$/, '') || `${req.protocol}://${req.get('host')}`;
-  res.json({ webhook_url: `${base}/webhooks/meta`, verify_code: getSetting('channels.verify_code'), base_is_public: Boolean(getSetting('channels.public_base_url')) });
+  const ps = getPlatformSettings();
+  const base = String(ps.public_url || getSetting('channels.public_base_url') || '').replace(/\/$/, '') || `${req.protocol}://${req.get('host')}`;
+  res.json({ webhook_url: `${base}/webhooks/meta/${req.tenant.slug}`, verify_code: getSetting('channels.verify_code'), base_is_public: Boolean(ps.public_url || getSetting('channels.public_base_url')), platform_manages_url: Boolean(ps.public_url) });
 });
 api.post('/channels/:name/test', async (req, res) => res.json(await testChannel(req.params.name)));
 
@@ -347,7 +348,9 @@ api.post('/channels/:name/test', async (req, res) => res.json(await testChannel(
 api.get('/events', (req, res) => {
   res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
   res.flushHeaders();
-  const send = (e) => res.write(`data: ${JSON.stringify(e)}\n\n`);
+  const tid = req.auth.tenantId;
+  const admin = isAdminView(req);
+  const send = (e) => { if (e.tenantId !== tid) return; res.write(`data: ${JSON.stringify({ type: e.type, data: e.data, at: e.at })}\n\n`); void admin; };
   bus.on('event', send);
   const ka = setInterval(() => res.write(': ping\n\n'), 25000);
   req.on('close', () => { bus.off('event', send); clearInterval(ka); });

@@ -32,7 +32,9 @@ test('Claude: حلقة الأدوات + شكل البرومبت + تنظيف ا�
   const sid = Number(q.run(`INSERT INTO sources(name,type) VALUES('t','file')`).lastInsertRowid);
   applyImport({ id: sid, mapping: autoMapping(table.headers), deactivate_missing: 1 }, table);
   q.run(`UPDATE categories SET instructions='اسأل عن المقاس الأوروبي' WHERE name='أحذية'`);
-  updateSettings({ ai: { provider: 'anthropic', api_key: 'test-key' }, bot: { debounce_ms: 0 }, persona: { extra_instructions: 'اذكر إن التوصيل سريع' } });
+  const { setPlatformSettings } = await import('../src/platform.js');
+  setPlatformSettings({ ai: { provider: 'anthropic', api_key: 'test-key' } });
+  updateSettings({ bot: { debounce_ms: 0 }, persona: { extra_instructions: 'اذكر إن التوصيل سريع' } });
 
   startWorker();
   const conv = findOrCreateConversation('simulator', 'claude1', 'x');

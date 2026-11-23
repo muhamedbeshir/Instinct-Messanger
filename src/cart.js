@@ -7,6 +7,7 @@ import { amountFor, bestAutoRule } from './discounts.js';
 import { normalizeAr, toLatinDigits, now, money } from './util.js';
 import { emit } from './events.js';
 import { enqueue } from './queue.js';
+import { track } from './platform.js';
 
 const SEP = /[,،/|؛;\n]+/;
 const optionList = (v) => String(v ?? '').split(SEP).map((s) => s.trim()).filter(Boolean);
@@ -215,6 +216,7 @@ export function createOrder(convId, { notes = '', payment_method = '' } = {}) {
   } catch (e) {
     return { error: e.message };
   }
+  track({ orders: 1 });
   emit('order', { id: order.id, number: order.number });
   enqueue({ kind: 'order_notify', payload: { order_id: order.id } });
   enqueue({ kind: 'order_export', payload: { order_id: order.id } });

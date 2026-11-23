@@ -1,8 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { UPLOAD_DIR, INBOUND_DIR } from './config.js';
+import { uploadDir, inboundDir, currentTenantId } from './tenancy.js';
 import { getSetting } from './db.js';
+import { getPlatformSettings } from './platform.js';
 
 const EXT = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
 const MIME = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' };
@@ -14,7 +15,7 @@ export function mimeFromName(name) { return MIME[path.extname(name).slice(1).toL
 export function saveInboundImage(buffer, contentType = 'image/jpeg') {
   const ext = EXT[contentType.split(';')[0]] || 'jpg';
   const name = `${crypto.randomUUID()}.${ext}`;
-  fs.writeFileSync(path.join(INBOUND_DIR, name), buffer);
+  fs.writeFileSync(path.join(inboundDir(), name), buffer);
   return name;
 }
 
@@ -35,8 +36,8 @@ export function normalizeImageUrl(u) {
 /** رابط عام مطلق لصورة (Meta بتحتاج رابط عام عشان تبعت الصورة) */
 export function absoluteUrl(u) {
   if (/^https?:\/\//i.test(u)) return u;
-  const base = String(getSetting('channels.public_base_url', '')).replace(/\/$/, '');
-  if (!base) throw new Error('لازم تضبط "الرابط العام للسيرفر" في إعدادات القنوات عشان صور المنتجات تتبعت.');
+  const base = String(getPlatformSettings().public_url || getSetting('channels.public_base_url', '')).replace(/\/$/, '');
+  if (!base) throw new Error('الرابط العام للسيرفر مش مضبوط، فمقدرناش نبعت صور المنتجات.');
   return base + (u.startsWith('/') ? u : '/' + u);
 }
 
@@ -47,10 +48,12 @@ export async function loadImageBase64(ref) {
   let buf; let type;
   try {
     if (typeof ref === 'object' && ref.local) {
-      const f = path.join(INBOUND_DIR, path.basename(ref.local));
+      const f = path.join(inboundDir(), path.basename(ref.local));
       buf = fs.readFileSync(f); type = mimeFromName(f);
     } else if (typeof ref === 'string' && ref.startsWith('/media/')) {
-      const f = path.join(UPLOAD_DIR, path.basename(ref));
+      const [, , tid, file] = ref.split('/');
+      if (Number(tid) !== currentTenantId()) return null; // صور عميل تاني ممنوعة
+      const f = path.join(uploadDir(), path.basename(file));
       buf = fs.readFileSync(f); type = mimeFromName(f);
     } else {
       const d = await downloadImage(normalizeImageUrl(typeof ref === 'string' ? ref : ref.url));

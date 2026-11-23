@@ -1,5 +1,7 @@
 import { q, hydrate, hydrateAll } from './db.js';
 import { normalizeAr, tokens, now } from './util.js';
+import { currentTenantId } from './tenancy.js';
+import { tenantInfo, limitOf } from './platform.js';
 
 /* ---------- الأقسام ---------- */
 export function listCategories({ activeOnly = false } = {}) {
@@ -24,11 +26,12 @@ export function getProduct(id) {
   return p || null;
 }
 
-let productCache = null;
-export function invalidateProducts() { productCache = null; }
+const productCaches = new Map();
+export function invalidateProducts() { productCaches.delete(currentTenantId()); }
 function allActiveProducts() {
-  if (!productCache) {
-    productCache = hydrateAll('products', q.all(`SELECT p.*, c.name AS category_name, c.active AS category_active
+  const tid = currentTenantId();
+  if (!productCaches.has(tid)) {
+    productCaches.set(tid, hydrateAll('products', q.all(`SELECT p.*, c.name AS category_name, c.active AS category_active
       FROM products p LEFT JOIN categories c ON c.id=p.category_id WHERE p.active=1`))
       .filter((p) => p.category_active !== 0)
       .map((p) => ({
@@ -36,9 +39,9 @@ function allActiveProducts() {
         _name: normalizeAr(p.name),
         _cat: normalizeAr(p.category_name || ''),
         _text: normalizeAr([p.description, p.sku, ...Object.entries(p.attributes).flatMap(([k, v]) => [k, v])].join(' ')),
-      }));
+      })));
   }
-  return productCache;
+  return productCaches.get(tid);
 }
 
 export function inStock(p, qty = 1) { return p.stock === null || p.stock === undefined || p.stock >= qty; }
@@ -83,7 +86,14 @@ export function catalogOverview() {
   return listCategories({ activeOnly: true }).filter((c) => c.product_count > 0);
 }
 
+export function productLimitLeft() {
+  const limit = limitOf(tenantInfo(), 'products');
+  if (limit < 0) return Infinity;
+  return Math.max(0, limit - q.get('SELECT COUNT(*) AS n FROM products').n);
+}
+
 export function saveProduct(input, id = null) {
+  if (!id && productLimitLeft() <= 0) throw new Error('وصلت للحد الأقصى من المنتجات في باقتك. رقّي الباقة لإضافة المزيد.');
   const images = Array.isArray(input.images) ? input.images.filter(Boolean) : [];
   const attributes = input.attributes && typeof input.attributes === 'object' ? input.attributes : {};
   const stock = input.stock === '' || input.stock === null || input.stock === undefined ? null : Number(input.stock);

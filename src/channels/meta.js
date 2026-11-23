@@ -7,6 +7,7 @@ import { now } from '../util.js';
 import { saveInboundImage, downloadImage } from '../images.js';
 import { emit } from '../events.js';
 import * as logger from '../logger.js';
+import { track } from '../platform.js';
 
 const graph = (p) => `https://graph.facebook.com/${getSetting('channels.graph_version', 'v21.0')}${p}`;
 
@@ -97,6 +98,7 @@ async function ingest({ channel, userId, name, mid, text, attachments, isEcho })
   const msg = addMessage(conv.id, { direction: 'in', sender: 'customer', text, attachments, external_id: mid });
   if (!msg) return; // مكررة
   q.run('UPDATE conversations SET unread=unread+1 WHERE id=?', conv.id);
+  track({ messages_in: 1 });
   emit('conversation', { id: conv.id });
   if (!conv.display_name) {
     fetchProfileName(channel, userId).then((n) => { if (n) q.run('UPDATE conversations SET display_name=? WHERE id=?', n, conv.id); }).catch(() => {});

@@ -2,7 +2,9 @@ import { q, getSetting, getSettings, hydrateAll } from '../db.js';
 import { getConversation, saveConversation, botIsPausedFor, listMessages } from '../conversations.js';
 import { buildSystem } from './prompt.js';
 import { toolDefinitions, executeTool } from './tools.js';
-import { runAnthropic, apiKey } from './anthropic.js';
+import { runAnthropic } from './anthropic.js';
+import { aiConfig } from './config.js';
+import { tenantInfo, aiQuota, track } from '../platform.js';
 import { runMock } from './mock.js';
 import { deliver, typing } from '../channels/index.js';
 import { markUsed } from '../knowledge.js';
@@ -12,12 +14,7 @@ import { emit } from '../events.js';
 import { enqueue } from '../queue.js';
 import * as logger from '../logger.js';
 
-export function providerName() {
-  const p = getSetting('ai.provider', 'auto');
-  if (p === 'mock') return 'mock';
-  if (p === 'anthropic') return 'anthropic';
-  return apiKey() ? 'anthropic' : 'mock';
-}
+export const providerName = () => aiConfig().provider;
 
 function inWorkingHours() {
   const wh = getSetting('working_hours');
@@ -45,7 +42,7 @@ async function buildMessages(conv, pending) {
     if (m.direction === 'in') {
       const blocks = [];
       const hasImg = (m.attachments || []).some((a) => a.type === 'image');
-      if (hasImg && pendingIds.has(m.id) && getSetting('ai.understand_images', true) && providerName() === 'anthropic') {
+      if (hasImg && pendingIds.has(m.id) && aiConfig().understand_images && providerName() === 'anthropic') {
         for (const a of m.attachments.filter((x) => x.type === 'image')) {
           const img = a.local ? await loadImageBase64({ local: a.local }) : (a.url ? await loadImageBase64(a.url) : null);
           if (img) blocks.push({ type: 'image', source: { type: 'base64', media_type: img.media_type, data: img.data } });
@@ -69,6 +66,7 @@ export async function respond(convId) {
   let conv = getConversation(convId);
   if (!conv) return;
   if (!getSetting('bot.enabled', true) || botIsPausedFor(conv)) return;
+  if (tenantInfo().status !== 'active') return; // اشتراك موقوف/منتهي: البوت ساكت (اللوحة بتنبّه صاحب المتجر)
 
   const repliedUpto = conv.state?.replied_upto || 0;
   const pending = hydrateAll('messages', q.all(`SELECT * FROM messages WHERE conversation_id=? AND direction='in' AND id>? ORDER BY id`, convId, repliedUpto));
@@ -101,6 +99,18 @@ export async function respond(convId) {
     if (!wh.bot_replies_off_hours) { markDone(); return; }
   }
 
+  // حصة الردود الذكية الشهرية حسب الباقة
+  const quota = aiQuota();
+  if (!quota.ok) {
+    saveConversation(convId, { needs_human: 1, needs_human_reason: 'quota' });
+    emit('alert', { conversation_id: convId, question: 'خلصت حصة الردود الذكية لباقتك الشهر ده', reason: 'quota' });
+    if (!conv.state?.quota_notified) { saveConversation(convId, { state: { ...getConversation(convId).state, quota_notified: true } }); await deliver(convId, { text: getSetting('bot.fallback_message') }); }
+    markDone();
+    return;
+  }
+  const cfg = aiConfig();
+  if (cfg.provider === 'mock' && !cfg.allow_mock) throw new Error('الذكاء الاصطناعي غير مضبوط على المنصة (مفتاح Claude ناقص)');
+
   typing(convId).catch(() => {});
   const { stable, dynamic, knowledgeIds, mode } = buildSystem(conv, text);
   const messages = await buildMessages(conv, pending);
@@ -121,7 +131,7 @@ export async function respond(convId) {
   const run = provider === 'anthropic'
     ? runAnthropic({ system: { stable, dynamic }, messages, tools, executeTool: exec, maxRounds: getSetting('bot.max_tool_rounds', 8) })
     : runMock({ messages, executeTool: exec, ctx });
-  const result = await withTimeout(run, getSetting('ai.timeout_ms', 45000) * 3, 'AI reply');
+  const result = await withTimeout(run, cfg.timeout_ms * 3, 'AI reply');
 
   // لو الموظف أو الإعدادات وقفوا البوت أثناء التفكير، منبعتش
   conv = getConversation(convId);
@@ -131,6 +141,7 @@ export async function respond(convId) {
   markUsed(knowledgeIds);
   await deliver(convId, { text: result.text, images: ctx.outbox, meta: { trace, provider, usage: result.usage } });
   markDone();
+  track({ ai_replies: 1, input_tokens: result.usage?.input, output_tokens: result.usage?.output });
 
   // لو العميل كتب حاجة تانية وإحنا بنرد، نكمّل
   const more = q.get(`SELECT COUNT(*) AS n FROM messages WHERE conversation_id=? AND direction='in' AND id>?`, convId, maxId).n;

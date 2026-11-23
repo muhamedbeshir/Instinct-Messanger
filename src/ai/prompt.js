@@ -59,14 +59,14 @@ function categoriesBlock() {
   }).join('\n');
 }
 
-export function buildSystem(conv, lastCustomerText = '') {
+export function buildSystem(conv, lastCustomerText = '', { redact = false } = {}) {
   const s = getSettings();
   const mode = activeMode();
   const vars = { business_name: s.business.name };
   const knowledge = searchKnowledge(lastCustomerText, 4);
 
   const stable = [
-    BASE_RULES,
+    redact ? '[القواعد الأمنية الأساسية للنظام: مضافة تلقائيًا ومخفية]' : BASE_RULES,
     `# Store information\n${businessBlock(s)}`,
     `# Persona and style (set by the store owner)\n${fill(s.persona.instructions, vars)}\nStyle: ${fill(s.persona.style, vars)}\nGreeting for a new chat (adapt naturally, do not repeat it later): ${fill(s.persona.greeting, vars)}`
       + (s.persona.extra_instructions ? `\nAdditional owner instructions:\n${fill(s.persona.extra_instructions, vars)}` : '')

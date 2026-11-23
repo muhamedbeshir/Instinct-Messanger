@@ -1,25 +1,19 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { getSetting } from '../db.js';
-import { ENV_ANTHROPIC_KEY } from '../config.js';
+import { aiConfig } from './config.js';
 import * as logger from '../logger.js';
 
-export const apiKey = () => getSetting('ai.api_key') || ENV_ANTHROPIC_KEY;
-
-let client = null; let clientKey = '';
-function getClient() {
-  const key = apiKey();
-  if (!client || clientKey !== key) {
-    client = new Anthropic({ apiKey: key, timeout: getSetting('ai.timeout_ms', 45000), maxRetries: 2 });
-    clientKey = key;
-  }
-  return client;
+const clients = new Map();
+function getClient(cfg) {
+  const k = `${cfg.apiKey}|${cfg.timeout_ms}`;
+  if (!clients.has(k)) clients.set(k, new Anthropic({ apiKey: cfg.apiKey, timeout: cfg.timeout_ms, maxRetries: 2 }));
+  return clients.get(k);
 }
 
 const toolResultContent = (out) => (out && out.__content ? out.__content : JSON.stringify(out));
 
 export async function runAnthropic({ system, messages, tools, executeTool, maxRounds }) {
-  const model = getSetting('ai.model', 'claude-sonnet-5-5');
-  const max_tokens = getSetting('ai.max_tokens', 1024);
+  const cfg = aiConfig();
+  const { model, max_tokens } = cfg;
   const convo = [...messages];
   const sys = [
     { type: 'text', text: system.stable, cache_control: { type: 'ephemeral' } },
@@ -27,7 +21,7 @@ export async function runAnthropic({ system, messages, tools, executeTool, maxRo
   ];
   let usage = { input: 0, output: 0 };
   for (let round = 0; round < maxRounds; round++) {
-    const res = await getClient().messages.create({ model, max_tokens, system: sys, tools, messages: convo });
+    const res = await getClient(cfg).messages.create({ model, max_tokens, system: sys, tools, messages: convo });
     usage.input += res.usage?.input_tokens || 0; usage.output += res.usage?.output_tokens || 0;
     convo.push({ role: 'assistant', content: res.content });
     if (res.stop_reason !== 'tool_use') {
@@ -46,6 +40,6 @@ export async function runAnthropic({ system, messages, tools, executeTool, maxRo
     convo.push({ role: 'user', content: results });
   }
   // وصلنا لحد الجولات: اطلب رد نهائي بدون أدوات
-  const res = await getClient().messages.create({ model, max_tokens, system: sys, tools, tool_choice: { type: 'none' }, messages: convo });
+  const res = await getClient(cfg).messages.create({ model, max_tokens, system: sys, tools, tool_choice: { type: 'none' }, messages: convo });
   return { text: res.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim(), usage };
 }
