@@ -209,10 +209,14 @@ export function getSetting(pathStr, fallback) {
   for (const p of pathStr.split('.')) { if (cur == null) return fallback; cur = cur[p]; }
   return cur === undefined ? fallback : cur;
 }
+// خرائط بتتستبدل بالكامل (عشان لما تمسح صف من اللوحة يتمسح فعلًا)
+const REPLACE_MAPS = [['notifications', 'status_messages']];
 export function updateSettings(patch) {
   const cur = getSettings();
   for (const [k, v] of Object.entries(patch)) {
-    const next = isPlainObject(cur[k]) && isPlainObject(v) ? deepMerge(cur[k], v) : v;
+    let base = cur[k];
+    for (const [top, sub] of REPLACE_MAPS) if (k === top && isPlainObject(v) && isPlainObject(v[sub])) base = { ...base, [sub]: {} };
+    const next = isPlainObject(base) && isPlainObject(v) ? deepMerge(base, v) : v;
     q.run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', k, JSON.stringify(next));
   }
   cache = null;

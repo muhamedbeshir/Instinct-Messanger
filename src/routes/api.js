@@ -107,7 +107,6 @@ function crud(base, table, fields, { orderBy = 'id', after } = {}) {
   api.delete(`${base}/:id`, (req, res) => { q.run(`DELETE FROM ${table} WHERE id=?`, req.params.id); after?.(); res.json({ ok: true }); });
 }
 crud('/categories', 'categories', ['name', 'description', 'instructions', 'required_fields', 'policy', 'active', 'sort'], { orderBy: 'sort, id', after: invalidateProducts });
-api.get('/categories', (req, res, next) => next()); // (قائمة بعدد المنتجات تحت)
 crud('/shipping', 'shipping_rates', ['governorate', 'price', 'eta', 'aliases', 'active']);
 crud('/discounts', 'discount_rules', ['name', 'type', 'value', 'trigger', 'min_order', 'max_discount', 'coupon_code', 'instructions', 'active']);
 crud('/modes', 'modes', ['name', 'description', 'instructions', 'take_orders', 'allow_retention_discount', 'allow_upsell', 'send_images']);
