@@ -1,37 +1,5 @@
-/* لوحة تحكم Instinct Messenger — واجهة عربية بدون أي مكتبات خارجية */
-const $ = (s, el = document) => el.querySelector(s);
-const $$ = (s, el = document) => [...el.querySelectorAll(s)];
-const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const fmt = (n) => (Math.round((Number(n) || 0) * 100) / 100).toLocaleString('en-US');
-const when = (t) => (t ? new Date(t).toLocaleString('ar-EG', { dateStyle: 'short', timeStyle: 'short' }) : '—');
-const CH = { messenger: 'ماسنجر', instagram: 'إنستجرام', whatsapp: 'واتساب', simulator: 'تجربة' };
-
-function toast(msg, bad = false) {
-  const t = document.createElement('div'); t.className = 'toast' + (bad ? ' bad' : ''); t.textContent = msg;
-  $('#toasts').append(t); setTimeout(() => t.remove(), bad ? 6000 : 3500);
-}
-async function api(method, path, body, raw) {
-  const opt = { method, headers: {}, credentials: 'same-origin' };
-  if (raw) { opt.body = raw; } else if (body !== undefined) { opt.headers['content-type'] = 'application/json'; opt.body = JSON.stringify(body); }
-  const res = await fetch('/api' + path, opt);
-  if (res.status === 401 && !path.startsWith('/auth/')) { renderLogin(); throw new Error('سجّل الدخول'); }
-  const data = res.headers.get('content-type')?.includes('json') ? await res.json() : null;
-  if (!res.ok) { const e = new Error(data?.error || `خطأ ${res.status}`); toast(e.message, true); throw e; }
-  return data;
-}
-const get = (p) => api('GET', p); const post = (p, b) => api('POST', p, b ?? {}); const put = (p, b) => api('PUT', p, b); const del = (p) => api('DELETE', p);
-
-/* ---------------- نافذة منبثقة ---------------- */
-function modal(title, bodyHtml, { onSave, saveText = 'حفظ', wide } = {}) {
-  const m = document.createElement('div'); m.className = 'modal';
-  m.innerHTML = `<div class="box" ${wide ? 'style="max-width:980px"' : ''}><div class="row sp"><h2>${esc(title)}</h2><button class="ghost small" data-close>✕</button></div><div class="mbody">${bodyHtml}</div>${onSave ? `<div class="row" style="margin-top:14px"><button data-save>${saveText}</button><button class="ghost" data-close>إلغاء</button></div>` : ''}</div>`;
-  document.body.append(m);
-  const close = () => m.remove();
-  m.addEventListener('click', (e) => { if (e.target === m || e.target.closest('[data-close]')) close(); });
-  $('[data-save]', m)?.addEventListener('click', async (e) => { e.target.disabled = true; try { if ((await onSave(m)) !== false) close(); } finally { e.target.disabled = false; } });
-  return { el: m, close };
-}
-const confirmBox = (msg) => window.confirm(msg);
+/* لوحة تحكم المتجر (العميل): عربي RTL، بدون مكتبات. التصميم من shared/base.css */
+import { $, $$, esc, fmt, when, day, CH, toast, api, get, post, put, patch, del, modal, confirmBox, beep, meter, setUnauthorizedHandler } from '/shared/ui.js';
 
 /* ---------------- مولّد حقول الإعدادات ---------------- */
 function getPath(o, p) { return p.split('.').reduce((a, k) => (a == null ? a : a[k]), o); }
@@ -131,7 +99,7 @@ const GROUPS = {
     T('notifications.notify_customer_on_status', 'ابعت للعميل رسالة لما تتغير حالة أوردره', 'bool'),
     T('notifications.status_messages', 'رسائل الحالات', 'rows', { asMap: true, cols: [{ k: 'status', label: 'الحالة' }, { k: 'message', label: 'الرسالة ({number} = رقم الأوردر)' }] })] },
   channels: { title: 'ربط القنوات (Meta)', fields: [
-    T('channels.public_base_url', 'الرابط العام للسيرفر (https)', 'text', { dir: 'ltr', hint: 'لازم عشان ميتا تبعت الرسائل وتبعت صور المنتجات. محليًا استخدم ngrok أو cloudflared.' }),
+    T('channels.public_base_url', 'الرابط العام للسيرفر (https)', 'text', { dir: 'ltr', hint: 'لازم عشان ميتا تبعت صور المنتجات.' }),
     T('channels.app_secret', 'Meta App Secret (للتحقق من الرسائل)', 'secret'),
     T('channels.messenger.enabled', 'تفعيل ماسنجر', 'bool'), T('channels.messenger.page_access_token', 'Page Access Token', 'secret'),
     T('channels.instagram.enabled', 'تفعيل إنستجرام', 'bool'), T('channels.instagram.access_token', 'Instagram Access Token (سيبه فاضي لو بنفس توكن الصفحة)', 'secret'),
@@ -141,7 +109,7 @@ const GROUPS = {
 
 async function settingsForm(root, groupKeys, { onSaved } = {}) {
   const s = await get('/settings');
-  const groups = groupKeys.map((k) => GROUPS[k]);
+  const groups = groupKeys.map((k) => ({ ...GROUPS[k], fields: GROUPS[k].fields.filter((f) => getPath(s, f.path) !== undefined) })).filter((g) => g.fields.length);
   const fields = groups.flatMap((g) => g.fields);
   const byPath = Object.fromEntries(fields.map((f) => [f.path, f]));
   root.innerHTML = groups.map((g) => `<div class="card"><h3 style="margin-top:0">${esc(g.title)}</h3>${g.hint ? `<div class="hint" style="margin-bottom:8px">${esc(g.hint)}</div>` : ''}${g.fields.map((f) => fieldHtml(f, s)).join('')}</div>`).join('')
@@ -158,11 +126,12 @@ const main = () => $('#main');
 pages.home = async (el) => {
   const [o, orders, convs, health] = await Promise.all([get('/overview'), get('/orders?status='), get('/conversations?filter=needs_human'), get('/health')]);
   const checks = [
-    [health.provider === 'anthropic', 'مفتاح Claude متضبط', '#/ai'],
-    [o.products > 0, 'فيه منتجات', '#/import'],
-    [Object.values(health.channels).some((c) => c.enabled && c.configured), 'قناة واحدة على الأقل متوصلة (ماسنجر/إنستجرام/واتساب)', '#/channels'],
+    [o.products > 0, 'ضيف منتجاتك (من شيت أو يدويًا)', '#/import'],
+    [Object.values(health.channels).some((c) => c.enabled && c.configured), 'اربط قناة واحدة على الأقل (ماسنجر / إنستجرام / واتساب)', '#/channels'],
+    [Boolean(ME.tenant.name && ME.tenant.name !== 'متجرنا'), 'اكتب بيانات المتجر وسياساته', '#/persona'],
   ];
-  el.innerHTML = `<h2>نظرة عامة</h2>
+  const owner = ME.role === 'owner';
+  el.innerHTML = `<div class="pagehead"><h2>أهلاً، ${esc(ME.tenant.name)}</h2></div>
   <div class="grid g4">
     <div class="card stat"><b>${o.orders_today}</b><span>أوردرات النهارده</span></div>
     <div class="card stat"><b>${fmt(o.sales_today)}</b><span>مبيعات النهارده</span></div>
@@ -171,12 +140,13 @@ pages.home = async (el) => {
     <div class="card stat"><b>${o.open_questions}</b><span>أسئلة البوت ما عرفهاش</span></div>
     <div class="card stat"><b>${o.products}</b><span>منتج فعّال</span></div>
   </div>
-  ${checks.some((c) => !c[0]) ? `<div class="card"><h3 style="margin-top:0">خطوات التشغيل</h3>${checks.map(([ok, t, h]) => `<div>${ok ? '✅' : '⬜'} ${ok ? esc(t) : `<a href="${h}">${esc(t)}</a>`}</div>`).join('')}${health.provider === 'mock' ? '<div class="hint" style="margin-top:8px">⚠️ البوت دلوقتي بالوضع التجريبي (قواعد بسيطة). ضيف مفتاح Claude عشان يتكلم بذكاء.</div>' : ''}</div>` : ''}
+  ${owner && checks.some((c) => !c[0]) ? `<div class="card"><h3>خطوات التشغيل</h3>${checks.map(([ok, t, h]) => `<div style="padding:4px 0">${ok ? '✅' : '⬜'} ${ok ? esc(t) : `<a href="${h}">${esc(t)}</a>`}</div>`).join('')}</div>` : ''}
   <div class="grid g2">
-    <div class="card"><h3 style="margin-top:0">آخر الأوردرات</h3>${orders.slice(0, 6).map((x) => `<div class="row sp"><a href="#/orders">${esc(x.number)}</a><span>${esc(x.customer_name)}</span><b>${fmt(x.total)}</b><span class="tag">${esc(x.status)}</span></div>`).join('') || '<span class="muted">لسه مفيش أوردرات</span>'}</div>
-    <div class="card"><h3 style="margin-top:0">محتاجين تدخلك</h3>${convs.slice(0, 6).map((c) => `<div class="row sp"><a href="#/chats/${c.id}">${esc(c.display_name || c.external_id)}</a><span class="tag warn">${esc(c.needs_human_reason || 'محتاج رد')}</span><span class="tag">${CH[c.channel]}</span></div>`).join('') || '<span class="muted">مفيش 👌</span>'}</div>
+    <div class="card"><h3>آخر الأوردرات</h3>${orders.slice(0, 6).map((x) => `<div class="row sp" style="padding:6px 0"><a href="#/orders">${esc(x.number)}</a><span>${esc(x.customer_name)}</span><b>${fmt(x.total)}</b><span class="tag">${esc(x.status)}</span></div>`).join('') || '<span class="muted">لسه مفيش أوردرات</span>'}</div>
+    <div class="card"><h3>محتاجين تدخلك</h3>${convs.slice(0, 6).map((c) => `<div class="row sp" style="padding:6px 0"><a href="#/chats/${c.id}">${esc(c.display_name || c.external_id)}</a><span class="tag warn">${esc(REASONS[c.needs_human_reason] || 'محتاج رد')}</span><span class="tag">${CH[c.channel]}</span></div>`).join('') || '<span class="muted">مفيش 👌</span>'}</div>
   </div>`;
 };
+const REASONS = { quota: 'خلصت حصة الردود', human_requested: 'طلب موظف', complaint: 'شكوى', refund: 'استرجاع', payment_proof: 'إيصال دفع', unknown_answer: 'سؤال بدون إجابة', bot_error: 'عطل مؤقت', other: 'محتاج رد' };
 
 /* --- الأوردرات --- */
 pages.orders = async (el) => {
@@ -208,9 +178,10 @@ pages.orders = async (el) => {
 /* --- المحادثات --- */
 function threadHtml(messages, { trace } = {}) {
   return messages.map((m) => {
-    const img = (m.attachments || []).filter((a) => a.type === 'image').map((a) => `<img src="${a.local ? `/api/inbound/${esc(a.local)}` : esc(a.url)}" alt="">`).join('');
+    const img = (m.attachments || []).filter((a) => a.type === 'image').map((a) => `<img src="${a.local ? `/api/inbound/${esc(a.local)}` : esc(a.url)}" alt="صورة من العميل">`).join('');
+    const steps = m.meta?.steps?.length ? `<div class="steps">${[...new Set(m.meta.steps)].map((x) => `<span>${esc(x)}</span>`).join('')}</div>` : '';
     const tr = trace && m.meta?.trace?.length ? `<details><summary class="muted" style="font-size:12px;cursor:pointer">🔍 الأدوات (${m.meta.trace.length}) · ${esc(m.meta.provider || '')}</summary><div class="trace">${esc(m.meta.trace.map((t) => `${t.tool}(${JSON.stringify(t.input)})\n→ ${JSON.stringify(t.output).slice(0, 400)}`).join('\n\n'))}</div></details>` : '';
-    return `<div class="m ${m.sender} ${m.status === 'failed' ? 'failed' : ''}">${img}${esc(m.text)}${tr}<small>${m.sender === 'bot' ? 'البوت' : m.sender === 'human' ? 'أنت' : 'العميل'} · ${when(m.created_at)}${m.status === 'failed' ? ' · ⚠️ ما اتبعتش' : ''}</small></div>`;
+    return `<div class="m ${m.sender} ${m.status === 'failed' ? 'failed' : ''}">${img}${esc(m.text)}${steps}${tr}<small>${m.sender === 'bot' ? 'البوت' : m.sender === 'human' ? 'أنت' : 'العميل'} · ${when(m.created_at)}${m.status === 'failed' ? ' · ⚠️ ما اتبعتش' : ''}</small></div>`;
   }).join('');
 }
 
@@ -230,7 +201,7 @@ pages.chats = async (el, arg) => {
     th.innerHTML = `<div class="row sp" style="padding:10px 14px;border-bottom:1px solid var(--line)"><div><b>${esc(c.display_name || c.external_id)}</b> <span class="tag">${CH[c.channel] || c.channel}</span><div class="muted" style="font-size:12px">${esc(Object.values(c.customer || {}).join(' · '))}</div></div>
       <div class="row"><button class="small ${c.bot_active ? 'ghost' : ''}" id="tg">${c.bot_active ? '⏸ إيقاف البوت' : '▶ تشغيل البوت'}</button>${c.needs_human ? '<button class="small ghost" id="rs">تم الحل</button>' : ''}</div></div>
       ${d.unanswered.map((u) => `<div style="padding:10px 14px;background:var(--soft)"><b>❓ سؤال البوت ما عرفش يجاوبه:</b> ${esc(u.question)}<div class="row" style="margin-top:6px"><textarea data-ua="${u.id}" style="min-height:50px" placeholder="اكتب الإجابة، هتتبعت للعميل وتتحفظ في قاعدة المعرفة"></textarea><button class="small" data-uans="${u.id}">رد وتعلّم</button></div></div>`).join('')}
-      <div class="msgs" id="msgs">${threadHtml(d.messages, { trace: true })}</div>
+      <div class="msgs" id="msgs">${threadHtml(d.messages, { trace: ME?.platform_admin })}</div>
       <div class="composer"><textarea id="reply" placeholder="اكتب رد بنفسك (البوت هيسكت ${'شوية'} لحد ما تخلص)">${esc(draft)}</textarea><button id="send">إرسال</button></div>`;
     const ms = $('#msgs', th); if (atBottom || !prev) ms.scrollTop = ms.scrollHeight; else ms.scrollTop = prev.scrollTop;
     $('#tg', th).onclick = async () => { await post(`/conversations/${selected}/pause`, { paused: c.bot_active }); loadThread(); loadList(); };
@@ -258,7 +229,7 @@ pages.sim = async (el) => {
     if (!convId) { const list = await get('/conversations'); convId = list.find((c) => c.channel === 'simulator' && c.external_id === session)?.id || null; }
     if (!convId) return;
     const d = await get(`/conversations/${convId}`); const ms = $('#msgs', el);
-    ms.innerHTML = threadHtml(d.messages, { trace: true }); ms.scrollTop = ms.scrollHeight;
+    ms.innerHTML = threadHtml(d.messages, { trace: ME?.platform_admin }); ms.scrollTop = ms.scrollHeight;
   };
   const send = async () => {
     const text = $('#txt', el).value.trim(); if (!text && !img) return;
@@ -471,47 +442,112 @@ pages.persona = async (el) => {
   await settingsForm($('#form', el), ['persona', 'business']);
   $('#seeprompt', el).onclick = async () => { const p = await get('/prompt-preview'); modal(`البرومبت الكامل (وضع: ${p.mode})`, `<pre class="prompt">${esc(p.prompt)}</pre>`, { wide: true }); };
 };
-pages.ai = async (el) => { el.innerHTML = '<h2>الذكاء الاصطناعي والسلوك</h2><div id="form"></div>'; await settingsForm($('#form', el), ['ai', 'bot', 'hours']); };
-pages.settings = async (el) => { el.innerHTML = '<h2>الإعدادات العامة</h2><div id="form"></div><div class="card"><h3 style="margin-top:0">تغيير باسورد اللوحة</h3><div class="row"><input type="password" id="pw0" placeholder="الحالي" style="max-width:200px"><input type="password" id="pw1" placeholder="الجديد (6+ حروف)" style="max-width:200px"><button id="chpw" class="small">تغيير</button></div></div>'; await settingsForm($('#form', el), ['orders', 'shipping', 'notifications']); $('#chpw', el).onclick = async () => { await post('/auth/change', { current: $('#pw0', el).value, password: $('#pw1', el).value }); toast('اتغيّر ✓'); }; };
+pages.behavior = async (el) => { el.innerHTML = '<div class="pagehead"><h2>سلوك البوت</h2></div><div id="form"></div>'; await settingsForm($('#form', el), ['ai', 'bot', 'hours']); };
+pages.settings = async (el) => {
+  el.innerHTML = '<div class="pagehead"><h2>إعدادات عامة</h2></div><div id="form"></div>';
+  await settingsForm($('#form', el), ['orders', 'shipping', 'notifications']);
+};
+pages.account = async (el) => {
+  el.innerHTML = `<div class="pagehead"><h2>حسابي</h2></div><div class="card"><div class="row sp"><div><b>${esc(ME.user.name || ME.user.email)}</b><div class="muted">${esc(ME.user.email)} · ${ME.role === 'owner' ? 'مالك' : 'موظف'}</div></div></div></div>
+  <div class="card"><h3>تغيير كلمة السر</h3><div class="row"><input type="password" id="pw0" placeholder="الحالية" autocomplete="current-password" style="max-width:220px"><input type="password" id="pw1" placeholder="الجديدة (8+ حروف)" autocomplete="new-password" style="max-width:220px"><button id="chpw">تغيير</button></div></div>`;
+  $('#chpw', el).onclick = async () => { await post('/auth/change-password', { current: $('#pw0', el).value, password: $('#pw1', el).value }); toast('اتغيّرت ✓'); $('#pw0', el).value = ''; $('#pw1', el).value = ''; };
+};
 pages.channels = async (el) => {
   const info = await get('/channels/info');
-  el.innerHTML = `<h2>القنوات (ماسنجر · إنستجرام · واتساب)</h2><div class="card"><h3 style="margin-top:0">بيانات تحطها في Meta for Developers</h3><label style="margin-top:0">Callback URL (Webhook)</label><input readonly dir="ltr" value="${esc(info.webhook_url)}" onclick="this.select()">${info.base_is_public ? '' : '<div class="hint" style="color:var(--warn)">⚠️ ده رابط محلي. اضبط "الرابط العام للسيرفر" تحت (https) قبل ما تستخدمه مع ميتا.</div>'}<label>Verify Token</label><input readonly dir="ltr" value="${esc(info.verify_code)}" onclick="this.select()"><div class="hint">الخطوات بالتفصيل في ملف docs/SETUP.md في المشروع.</div></div><div id="form"></div>
-  <div class="card"><h3 style="margin-top:0">اختبار الاتصال</h3><div class="row"><button class="ghost small" data-t="messenger">ماسنجر</button><button class="ghost small" data-t="instagram">إنستجرام</button><button class="ghost small" data-t="whatsapp">واتساب</button></div><div id="tres" class="hint" style="margin-top:8px"></div></div>`;
+  el.innerHTML = `<div class="pagehead"><h2>القنوات</h2></div><div class="card"><h3>بيانات تحطها في Meta for Developers</h3><label>Callback URL (Webhook) الخاص بمتجرك</label><input readonly dir="ltr" value="${esc(info.webhook_url)}" onclick="this.select()">${info.base_is_public ? '' : '<div class="hint" style="color:var(--warn)">⚠️ ده رابط محلي. ميتا محتاجة رابط https عام.</div>'}<label>Verify Token</label><input readonly dir="ltr" value="${esc(info.verify_code)}" onclick="this.select()"><div class="hint">خطوات الربط بالتفصيل في صفحة "دليل الربط" (docs/SETUP.md).</div></div><div id="form"></div>
+  <div class="card"><h3>اختبار الاتصال</h3><div class="row"><button class="ghost small" data-t="messenger">ماسنجر</button><button class="ghost small" data-t="instagram">إنستجرام</button><button class="ghost small" data-t="whatsapp">واتساب</button></div><div id="tres" class="hint" style="margin-top:8px"></div></div>`;
   await settingsForm($('#form', el), ['channels']);
   $$('[data-t]', el).forEach((b) => { b.onclick = async () => { const r = await post(`/channels/${b.dataset.t}/test`); $('#tres', el).innerHTML = r.ok ? `✅ شغالة: ${esc(JSON.stringify(r.info))}` : `❌ ${esc(r.error)}`; }; });
 };
 
-/* --- الصحة --- */
+/* --- الاشتراك والاستهلاك --- */
+pages.billing = async (el) => {
+  const b = await get('/billing'); const u = b.usage; const lim = b.limits; const t = b.tenant;
+  const st = { active: ['فعّال', 'ok'], expired: ['منتهي', 'bad'], suspended: ['موقوف', 'bad'] }[t.status] || [t.status, ''];
+  el.innerHTML = `<div class="pagehead"><h2>الاشتراك والاستهلاك</h2></div>
+  <div class="card"><div class="row sp"><div><h3 style="margin:0">باقة ${esc(t.plan.name)} <span class="tag ${st[1]}">${st[0]}</span></h3><div class="muted" style="margin-top:4px">${t.days_left !== null ? (t.days_left >= 0 ? `باقي ${t.days_left} يوم` : 'انتهت') : 'بدون تاريخ انتهاء'}${t.plan.price ? ` · ${fmt(t.plan.price)} جنيه / شهر` : ''}</div></div></div>
+  ${meter('ردود البوت الذكية هذا الشهر', u.ai_replies, lim.ai_replies ?? -1)}${meter('المنتجات', ME.usage.products, lim.products ?? -1)}</div>
+  ${b.open_request ? '<div class="banner" style="border-radius:12px;margin-bottom:16px">طلب الترقية اتسجّل وهنتواصل معاك لتأكيد الدفع.</div>' : ''}
+  <h3>الباقات</h3><div class="grid g4">${b.plans.map((p) => `<div class="card" style="${p.slug === t.plan.slug ? 'border-color:var(--action);border-width:2px' : ''}"><h3 style="margin-top:0">${esc(p.name)}</h3><div class="stat"><b style="font-size:28px">${p.price ? fmt(p.price) : 'مجانًا'}</b><span>${p.price ? 'جنيه / شهر' : ''}</span></div><div class="hint" style="margin:8px 0">${esc(p.description)}</div>
+    <div style="font-size:14px;line-height:1.9">${fmt(p.limits.ai_replies < 0 ? 0 : p.limits.ai_replies)} رد ذكي/شهر<br>${p.limits.products < 0 ? 'منتجات بلا حد' : fmt(p.limits.products) + ' منتج'}<br>${p.limits.channels} قنوات · ${p.limits.staff} موظف</div>
+    ${p.slug === t.plan.slug ? '<div class="tag ok" style="margin-top:12px">باقتك الحالية</div>' : `<button class="small" style="margin-top:12px" data-up="${p.id}">اطلب الترقية</button>`}</div>`).join('')}</div>
+  ${b.payment_instructions ? `<div class="card"><h3>طريقة الدفع</h3><div style="white-space:pre-wrap">${esc(b.payment_instructions)}</div></div>` : ''}
+  ${b.support?.whatsapp || b.support?.email ? `<div class="hint">للدعم: ${esc(b.support.whatsapp || '')} ${esc(b.support.email || '')}</div>` : ''}
+  ${b.payments.length ? `<h3>المدفوعات</h3><div class="card tablewrap"><table><tbody>${b.payments.map((p) => `<tr><td>${day(p.created_at)}</td><td>${fmt(p.amount)} ${esc(p.currency)}</td><td>${esc(p.method)}</td><td>${p.months} شهر</td></tr>`).join('')}</tbody></table></div>` : ''}`;
+  $$('[data-up]', el).forEach((x) => { x.onclick = async () => { const note = prompt('ملاحظة (اختياري):') ?? ''; await post('/billing/upgrade', { plan_id: Number(x.dataset.up), note }); toast('اتسجّل طلبك ✓'); pages.billing(el); }; });
+};
+
+/* --- فريق العمل --- */
+pages.team = async (el) => {
+  const load = async () => {
+    const users = await get('/team');
+    el.innerHTML = `<div class="pagehead"><h2>فريق العمل</h2><button id="add">+ موظف</button></div><div class="hint" style="margin-bottom:12px">الموظف بيشوف الأوردرات والمحادثات ويرد على أسئلة البوت فقط، من غير الإعدادات أو الاشتراك.</div>
+    <div class="card tablewrap"><table><thead><tr><th>الاسم</th><th>الإيميل</th><th>الدور</th><th>آخر دخول</th><th></th></tr></thead><tbody>${users.map((u) => `<tr><td>${esc(u.name || '—')}</td><td dir="ltr" style="text-align:start">${esc(u.email)}</td><td>${u.role === 'owner' ? 'مالك' : 'موظف'}${u.active ? '' : ' <span class="tag bad">معطّل</span>'}</td><td>${when(u.last_login)}</td><td>${u.role === 'staff' ? `<button class="ghost small" data-pw="${u.id}">كلمة سر جديدة</button> <button class="ghost small" data-tg="${u.id}" data-a="${u.active ? 0 : 1}">${u.active ? 'تعطيل' : 'تفعيل'}</button> <button class="danger small" data-rm="${u.id}">حذف</button>` : ''}</td></tr>`).join('')}</tbody></table></div>`;
+    $('#add', el).onclick = () => modal('موظف جديد', `<label>الاسم</label><input id="u_n"><label>الإيميل</label><input id="u_e" type="email" dir="ltr"><label>كلمة السر (8+ حروف)</label><input id="u_p" type="text" dir="ltr"><div class="hint">سلّمها للموظف بنفسك. يقدر يغيّرها بعد الدخول.</div>`, { onSave: async (m) => { await post('/team', { name: $('#u_n', m.el).value, email: $('#u_e', m.el).value, password: $('#u_p', m.el).value }); load(); } });
+    $$('[data-pw]', el).forEach((b) => { b.onclick = async () => { const p = prompt('كلمة السر الجديدة (8+ حروف):'); if (p) { await patch(`/team/${b.dataset.pw}`, { password: p }); toast('اتغيّرت ✓'); } }; });
+    $$('[data-tg]', el).forEach((b) => { b.onclick = async () => { await patch(`/team/${b.dataset.tg}`, { active: b.dataset.a === '1' }); load(); }; });
+    $$('[data-rm]', el).forEach((b) => { b.onclick = async () => { if (confirmBox('حذف الموظف؟')) { await del(`/team/${b.dataset.rm}`); load(); } }; });
+  };
+  await load();
+};
+
+/* --- حالة الخدمة --- */
 pages.health = async (el) => {
   const h = await get('/health');
-  const lamp = (ok) => (ok ? '<span class="tag ok">شغال</span>' : '<span class="tag bad">مش متوصل</span>');
-  el.innerHTML = `<h2>صحة النظام</h2><div class="grid g4">
-    <div class="card stat"><b>${esc(h.provider === 'anthropic' ? 'Claude' : 'تجريبي ⚠️')}</b><span>مشغّل الذكاء الاصطناعي (${esc(h.model)})</span></div>
-    <div class="card stat"><b>${h.queue.pending}</b><span>رسائل في الطابور (${h.queue.running} بتتعالج)</span></div>
-    <div class="card stat"><b>${h.queue.failed}</b><span>مهام فشلت</span></div>
+  const lamp = (ok) => (ok ? '<span class="tag ok">متوصلة</span>' : '<span class="tag bad">غير متوصلة</span>');
+  el.innerHTML = `<div class="pagehead"><h2>حالة الخدمة</h2></div><div class="grid g4">
+    <div class="card stat"><b>${h.bot_enabled && h.status === 'active' ? 'شغال' : 'متوقف'}</b><span>البوت</span></div>
+    <div class="card stat"><b>${h.queue_pending}</b><span>رسائل في الطابور</span></div>
     <div class="card stat"><b>${h.failed_messages}</b><span>رسائل ما اتبعتش</span></div></div>
-  <div class="card"><h3 style="margin-top:0">القنوات</h3>${Object.entries(h.channels).map(([k, c]) => `<div class="row sp"><b>${CH[k]}</b><span>${c.enabled ? 'مفعّلة' : 'مقفولة'} · ${lamp(c.enabled && c.configured)}</span></div>`).join('')}
-  <div class="hint" style="margin-top:8px">${h.webhook_signature_check ? '🔒 التحقق من توقيع ميتا شغال' : '⚠️ App Secret مش مضبوط: الـ webhook بيقبل أي طلب. حطه من إعدادات القنوات.'}</div></div>
-  <div class="card tablewrap"><h3 style="margin-top:0">آخر الأخطاء والتحذيرات</h3><table><tbody>${h.recent_errors.map((l) => `<tr><td>${when(l.created_at)}</td><td><span class="tag ${l.level === 'error' ? 'bad' : 'warn'}">${l.level}</span></td><td>${esc(l.scope)}</td><td dir="auto">${esc(l.message)}</td></tr>`).join('') || '<tr><td class="muted">مفيش أخطاء 👌</td></tr>'}</tbody></table></div>`;
+  <div class="card"><h3>القنوات</h3>${Object.entries(h.channels).map(([k, c]) => `<div class="row sp" style="padding:6px 0"><b>${CH[k]}</b><span>${c.enabled ? 'مفعّلة' : 'مقفولة'} · ${lamp(c.enabled && c.configured)}</span></div>`).join('')}
+  <div class="hint" style="margin-top:8px">${h.webhook_signature_check ? '🔒 التحقق من توقيع ميتا شغال' : '⚠️ App Secret مش مضبوط: حطه من صفحة القنوات عشان الـ webhook يرفض أي طلب مش جاي من ميتا.'}</div></div>
+  ${h.recent_errors ? `<div class="card tablewrap"><h3>آخر الأخطاء (للإدارة فقط)</h3><table><tbody>${h.recent_errors.map((l) => `<tr><td>${when(l.created_at)}</td><td>${esc(l.scope)}</td><td dir="auto">${esc(l.message)}</td></tr>`).join('') || '<tr><td class="muted">مفيش</td></tr>'}</tbody></table></div>` : ''}`;
 };
 
 /* ---------------- الإطار + التوجيه ---------------- */
-const NAV = [['home', 'نظرة عامة'], ['orders', 'الأوردرات', 'ordersBadge'], ['chats', 'المحادثات', 'chatsBadge'], ['sim', 'تجربة البوت'], ['products', 'المنتجات'], ['categories', 'الأقسام'], ['import', 'استيراد من شيت'], ['shipping', 'الشحن'], ['discounts', 'الخصومات والأوضاع'], ['knowledge', 'قاعدة المعرفة', 'qBadge'], ['persona', 'الشخصية والتعليمات'], ['ai', 'الذكاء والسلوك'], ['channels', 'القنوات'], ['settings', 'إعدادات عامة'], ['health', 'صحة النظام']];
-let badges = {};
+let ME = null;
+const NAV_OWNER = [
+  ['', [['home', 'نظرة عامة'], ['orders', 'الأوردرات', 'ordersBadge'], ['chats', 'المحادثات', 'chatsBadge']]],
+  ['الكتالوج', [['products', 'المنتجات'], ['categories', 'الأقسام'], ['import', 'استيراد من شيت'], ['shipping', 'الشحن']]],
+  ['البوت', [['sim', 'تجربة البوت'], ['persona', 'الشخصية والتعليمات'], ['behavior', 'سلوك البوت'], ['discounts', 'الخصومات والأوضاع'], ['knowledge', 'قاعدة المعرفة', 'qBadge']]],
+  ['الحساب', [['channels', 'القنوات'], ['settings', 'إعدادات عامة'], ['team', 'فريق العمل'], ['billing', 'الاشتراك'], ['health', 'حالة الخدمة']]],
+];
+const NAV_STAFF = [['', [['home', 'نظرة عامة'], ['orders', 'الأوردرات', 'ordersBadge'], ['chats', 'المحادثات', 'chatsBadge'], ['knowledge', 'أسئلة البوت', 'qBadge'], ['sim', 'تجربة البوت']]]];
+const allowed = () => new Set((ME.role === 'owner' ? NAV_OWNER : NAV_STAFF).flatMap(([, items]) => items.map((i) => i[0])).concat(['account']));
+let badges = {}; let currentPage = ''; let cleanup = null;
+const main = () => $('#main');
+
 async function refreshBadges() {
   try { const o = await get('/overview'); badges = { ordersBadge: o.new_orders, chatsBadge: o.needs_human, qBadge: o.open_questions + o.pending_knowledge }; drawNav(); } catch { /* */ }
 }
 function drawNav() {
   const nav = $('#nav'); if (!nav) return;
-  nav.innerHTML = `<h1>🤖 Instinct Messenger</h1>${NAV.map(([k, l, b]) => `<a href="#/${k}" class="${currentPage === k ? 'on' : ''}">${l}${badges[b] ? `<span class="badge">${badges[b]}</span>` : ''}</a>`).join('')}<a href="#" id="logout" style="margin-top:12px">تسجيل خروج</a>`;
-  $('#logout').onclick = async (e) => { e.preventDefault(); await post('/auth/logout'); renderLogin(); };
+  const groups = ME.role === 'owner' ? NAV_OWNER : NAV_STAFF;
+  nav.innerHTML = `<div class="brand"><span class="mark" aria-hidden="true">${esc((ME.brand || 'I')[0])}</span><span>${esc(ME.tenant.name)}</span></div>`
+    + groups.map(([g, items]) => `${g ? `<div class="group">${g}</div>` : ''}${items.map(([k, l, b]) => `<a href="#/${k}" ${currentPage === k ? 'aria-current="page"' : ''}>${l}${badges[b] ? `<span class="badge">${badges[b]}</span>` : ''}</a>`).join('')}`).join('')
+    + `<div class="foot"><a href="#/account" ${currentPage === 'account' ? 'aria-current="page"' : ''}>${esc(ME.user.name || ME.user.email)}</a><a href="#" id="logout">تسجيل خروج</a></div>`;
+  $('#logout').onclick = async (e) => { e.preventDefault(); await post('/auth/logout'); location.hash = '#/'; renderAuth('login'); };
+}
+function banners() {
+  const out = [];
+  const t = ME.tenant;
+  if (ME.impersonating) out.push(`<div class="banner admin"><span>أنت داخل كمدير للمنصة على متجر "${esc(t.name)}". كل حاجة هنا حقيقية.</span><button class="small" id="stopimp">رجوع للوحة الإدارة</button></div>`);
+  if (ME.announcement) out.push(`<div class="banner ${ME.announcement.level === 'warn' ? 'warn' : ''}"><span>${esc(ME.announcement.text)}</span></div>`);
+  if (t.status === 'suspended') out.push(`<div class="banner bad"><span>الحساب موقوف: البوت متوقف والتعديل مقفول. تواصل مع الدعم.</span></div>`);
+  else if (t.status === 'expired') out.push(`<div class="banner bad"><span>الاشتراك انتهى: البوت متوقف ولا يرد على عملائك.</span>${ME.role === 'owner' ? '<a class="btn small" href="#/billing" style="min-height:32px">جدّد دلوقتي</a>' : ''}</div>`);
+  else if (t.days_left !== null && t.days_left <= 5) out.push(`<div class="banner warn"><span>${t.plan.price ? 'اشتراكك' : 'فترتك التجريبية'} بتخلص خلال ${Math.max(t.days_left, 0)} يوم.</span>${ME.role === 'owner' ? '<a class="btn small" href="#/billing" style="min-height:32px">الباقات</a>' : ''}</div>`);
+  const q = ME.limits.ai_replies;
+  if (t.status === 'active' && q >= 0 && ME.usage.ai_replies >= q) out.push(`<div class="banner bad"><span>خلصت حصة الردود الذكية لهذا الشهر: البوت بيحوّلك المحادثات الجديدة.</span>${ME.role === 'owner' ? '<a class="btn small" href="#/billing" style="min-height:32px">رقّي الباقة</a>' : ''}</div>`);
+  else if (t.status === 'active' && q >= 0 && ME.usage.ai_replies >= q * 0.85) out.push(`<div class="banner warn"><span>استهلكت ${Math.round((ME.usage.ai_replies / q) * 100)}% من ردود الشهر.</span></div>`);
+  return out.join('');
 }
 async function route() {
   const [, page = 'home', arg] = location.hash.split('/');
-  if (!pages[page]) return (location.hash = '#/home');
+  const ok = allowed();
+  if (!pages[page] || !ok.has(page)) return (location.hash = '#/home');
   cleanup?.(); cleanup = null; currentPage = page; drawNav();
   const el = main(); el.innerHTML = '<div class="muted">جاري التحميل...</div>';
-  try { await pages[page](el, arg); } catch (e) { if (!$('.login')) el.innerHTML = `<div class="card">حصل خطأ: ${esc(e.message)}</div>`; }
+  try { await pages[page](el, arg); } catch (e) { if (!$('.auth')) el.innerHTML = `<div class="card">حصل خطأ: ${esc(e.message)}</div>`; }
 }
 let es;
 function startEvents() {
@@ -524,14 +560,46 @@ function startEvents() {
     else if (ev.type === 'message' || ev.type === 'message_status' || ev.type === 'conversation') { window.onMsgEvent?.(ev); if (ev.type === 'message') refreshBadges(); }
   };
 }
-function beep() { try { const c = new (window.AudioContext || window.webkitAudioContext)(); const o = c.createOscillator(); const g = c.createGain(); o.connect(g); g.connect(c.destination); o.frequency.value = 880; g.gain.value = 0.08; o.start(); o.stop(c.currentTime + 0.18); } catch { /* */ } }
 
-function renderShell() { $('#app').innerHTML = '<div class="layout"><nav class="side" id="nav"></nav><main id="main"></main></div>'; startEvents(); refreshBadges(); route(); }
-function renderLogin(setup = false) {
-  es?.close();
-  $('#app').innerHTML = `<div class="login card"><h2>🤖 Instinct Messenger</h2><p class="muted">${setup ? 'أول مرة؟ اعمل باسورد للوحة التحكم.' : 'سجّل دخولك للوحة التحكم.'}</p><input type="password" id="pw" placeholder="${setup ? 'باسورد جديد (6 حروف على الأقل)' : 'الباسورد'}" autofocus><button id="go" style="margin-top:10px;width:100%">${setup ? 'إنشاء الباسورد والدخول' : 'دخول'}</button></div>`;
-  const go = async () => { try { await post(setup ? '/auth/setup' : '/auth/login', { password: $('#pw').value }); renderShell(); } catch { /* ظهر في toast */ } };
-  $('#go').onclick = go; $('#pw').onkeydown = (e) => { if (e.key === 'Enter') go(); };
+async function renderShell() {
+  ME = await get('/me');
+  $('#app').innerHTML = `<a class="skip-link" href="#main">تخطي للمحتوى</a><div id="banners">${banners()}</div><div class="layout"><nav class="side" id="nav" aria-label="القائمة الرئيسية"></nav><main id="main" tabindex="-1"></main></div>`;
+  $('#stopimp')?.addEventListener('click', async () => { const r = await post('/auth/stop-impersonating'); location.href = r.home; });
+  startEvents(); refreshBadges(); route();
 }
-window.addEventListener('hashchange', () => { if ($('#main')) route(); });
-(async () => { const s = await fetch('/api/auth/status').then((r) => r.json()); s.authed ? renderShell() : renderLogin(!s.setup); })();
+
+function renderAuth(mode = 'login') {
+  es?.close();
+  const signup = mode === 'signup';
+  $('#app').innerHTML = `<div class="auth"><div class="side-art"><div class="row"><span class="mark" style="background:var(--p-inv-ink);color:var(--p-inv-bg)">I</span><b>Instinct Messenger</b></div>
+    <div><h1>بوت بيرد على عملائك ويقفل الأوردر</h1><p style="margin-top:16px">ماسنجر وإنستجرام وواتساب في مكان واحد. منتجاتك من الشيت، وردوده بلهجتك، وأوردراتك قدامك لحظيًا.</p></div><div class="muted" style="color:var(--p-inv-ink);opacity:.7;font-size:14px">تجربة مجانية 14 يوم، من غير كارت.</div></div>
+    <div class="form"><form id="f" novalidate><h2>${signup ? 'ابدأ تجربتك المجانية' : 'سجّل دخولك'}</h2><p class="muted" style="margin:0 0 8px">${signup ? 'دقيقة واحدة وبوتك يبقى جاهز للتجربة.' : 'ادخل بإيميلك وكلمة السر.'}</p>
+    ${signup ? '<label for="bn">اسم المتجر</label><input id="bn" autocomplete="organization">' : ''}
+    <label for="em">الإيميل</label><input id="em" type="email" dir="ltr" autocomplete="email" autofocus>
+    <label for="pw">كلمة السر</label><input id="pw" type="password" autocomplete="${signup ? 'new-password' : 'current-password'}" placeholder="${signup ? '8 حروف على الأقل' : ''}">
+    <p class="form__status" id="err" role="alert" style="color:var(--bad);min-height:22px;margin:8px 0 0;font-size:14px"></p>
+    <button class="primary" id="go" type="submit">${signup ? 'إنشاء الحساب' : 'دخول'}</button>
+    <p class="alt">${signup ? 'عندك حساب؟ <a href="#/login">سجّل دخولك</a>' : 'متجر جديد؟ <a href="#/signup">ابدأ تجربة مجانية</a>'}</p></form></div></div>`;
+  $('#f').onsubmit = async (e) => {
+    e.preventDefault(); $('#err').textContent = ''; $('#go').disabled = true;
+    try {
+      const body = { email: $('#em').value, password: $('#pw').value };
+      if (signup) body.businessName = $('#bn').value;
+      const r = await post(signup ? '/auth/signup' : '/auth/login', body);
+      if (r.home && !r.home.startsWith('/app')) { location.href = r.home; return; }
+      location.hash = '#/home'; renderShell();
+    } catch (err) { $('#err').textContent = err.message; } finally { $('#go').disabled = false; }
+  };
+}
+
+window.addEventListener('hashchange', () => {
+  if ($('#main')) return route();
+  if ($('.auth')) renderAuth(location.hash.includes('signup') ? 'signup' : 'login');
+});
+setUnauthorizedHandler(() => renderAuth('login'));
+(async () => {
+  const s = await fetch('/api/auth/status').then((r) => r.json());
+  if (!s.authed) return renderAuth(location.hash.includes('signup') ? 'signup' : 'login');
+  if (s.role === 'superadmin') { location.href = '/admin/'; return; }
+  renderShell();
+})();
