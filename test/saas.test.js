@@ -217,3 +217,12 @@ test('استيراد منتجات يحترم عزل العميل وحد البا
   assert.equal(sync.created, 4);
   assert.equal((await A.get('/api/products?q=حذاء')).data.total, 0);
 });
+
+test('الصفحات العامة: هبوط ولوحة المتجر ولوحة الإدارة وملفات التصميم', async () => {
+  const raw = new Client();
+  const home = await raw.get('/'); assert.equal(home.status, 200); assert.match(home.data, /dir="rtl"/); assert.match(home.data, /\/app\/#\/signup/);
+  assert.equal((await raw.get('/app/')).status, 200); assert.equal((await raw.get('/admin/')).status, 200);
+  assert.equal((await raw.get('/shared/base.css')).status, 200); assert.equal((await raw.get('/assets/system.css')).status, 200);
+  assert.equal((await raw.get('/webhooks/meta')).status, 404);
+  const hdr = await fetch(base + '/'); assert.equal(hdr.headers.get('x-frame-options'), 'DENY'); assert.equal(hdr.headers.get('x-content-type-options'), 'nosniff');
+});
