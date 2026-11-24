@@ -49,5 +49,5 @@ export function beep() { try { const c = new (window.AudioContext || window.webk
 /** شريط استهلاك: used من limit (-1 = بدون حد) */
 export function meter(label, used, limit) {
   const unl = limit < 0; const pct = unl ? 0 : Math.min(100, Math.round((used / Math.max(limit, 1)) * 100));
-  return `<div style="margin:12px 0"><div class="row sp"><span>${esc(label)}</span><span class="muted">${fmt(used)} / ${unl ? 'بدون حد' : fmt(limit)}</span></div><div class="meter ${!unl && used >= limit ? 'over' : ''}"><i style="width:${unl ? 4 : pct}%"></i></div></div>`;
+  return `<div style="margin:12px 0"><div class="row sp"><span>${esc(label)}</span><span class="muted"><bdi dir="ltr">${fmt(used)} / ${unl ? "∞" : fmt(limit)}</bdi></span></div><div class="meter ${!unl && used >= limit ? 'over' : ''}"><i style="width:${unl ? 4 : pct}%"></i></div></div>`;
 }

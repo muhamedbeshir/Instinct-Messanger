@@ -11,7 +11,7 @@ const home = (role) => (role === 'superadmin' ? '/admin/' : '/app/');
 authRouter.get('/auth/status', (req, res) => {
   const ps = getPlatformSettings();
   res.json({
-    authed: Boolean(req.auth), role: req.auth?.role || null, home: req.auth ? home(req.auth.role) : null,
+    authed: Boolean(req.auth), email: req.auth?.user.email || null, role: req.auth?.role || null, home: req.auth ? home(req.auth.role) : null,
     signup_open: ps.signup.open, brand: ps.brand.name, has_superadmin: Boolean(pq.get(`SELECT 1 FROM users WHERE role='superadmin'`)),
     setup_needed: !pq.get(`SELECT 1 FROM users WHERE role='superadmin'`) && Boolean(auth.getSetupCode()),
   });

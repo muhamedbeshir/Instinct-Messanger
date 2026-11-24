@@ -34,7 +34,7 @@ nav.side a[aria-current=page] .badge{background:var(--action-ink);color:var(--ac
 .grid{display:grid;gap:var(--s-4)}
 .g2{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
 .g3{grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
-.g4{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
+.g4{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
 .stat b{display:block;font-size:var(--t-stat);font-weight:500;letter-spacing:-.02em;line-height:1.1;font-variant-numeric:tabular-nums}
 .stat span{color:var(--muted);font-size:var(--t-small)}
 .stat{margin-bottom:0}

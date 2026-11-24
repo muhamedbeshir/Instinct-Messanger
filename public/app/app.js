@@ -514,8 +514,7 @@ const NAV_OWNER = [
 ];
 const NAV_STAFF = [['', [['home', 'نظرة عامة'], ['orders', 'الأوردرات', 'ordersBadge'], ['chats', 'المحادثات', 'chatsBadge'], ['knowledge', 'أسئلة البوت', 'qBadge'], ['sim', 'تجربة البوت']]]];
 const allowed = () => new Set((ME.role === 'owner' ? NAV_OWNER : NAV_STAFF).flatMap(([, items]) => items.map((i) => i[0])).concat(['account']));
-let badges = {}; let currentPage = ''; let cleanup = null;
-const main = () => $('#main');
+let badges = {};
 
 async function refreshBadges() {
   try { const o = await get('/overview'); badges = { ordersBadge: o.new_orders, chatsBadge: o.needs_human, qBadge: o.open_questions + o.pending_knowledge }; drawNav(); } catch { /* */ }
