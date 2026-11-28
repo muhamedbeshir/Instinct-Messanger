@@ -452,12 +452,75 @@ pages.account = async (el) => {
   <div class="card"><h3>تغيير كلمة السر</h3><div class="row"><input type="password" id="pw0" placeholder="الحالية" autocomplete="current-password" style="max-width:220px"><input type="password" id="pw1" placeholder="الجديدة (8+ حروف)" autocomplete="new-password" style="max-width:220px"><button id="chpw">تغيير</button></div></div>`;
   $('#chpw', el).onclick = async () => { await post('/auth/change-password', { current: $('#pw0', el).value, password: $('#pw1', el).value }); toast('اتغيّرت ✓'); $('#pw0', el).value = ''; $('#pw1', el).value = ''; };
 };
+/* --- ربط القنوات --- */
+function loadFB(appId, version) {
+  return new Promise((resolve, reject) => {
+    if (window.FB) return resolve();
+    window.fbAsyncInit = () => { window.FB.init({ appId, cookie: true, xfbml: false, version }); resolve(); };
+    const sc = document.createElement('script'); sc.src = 'https://connect.facebook.net/en_US/sdk.js'; sc.async = true;
+    sc.onerror = () => reject(new Error('تعذّر تحميل ميتا، اتأكد من الاتصال أو من مانع الإعلانات.'));
+    document.head.append(sc);
+  });
+}
+const CH_NAMES = { messenger: 'ماسنجر', instagram: 'إنستجرام', whatsapp: 'واتساب' };
 pages.channels = async (el) => {
-  const info = await get('/channels/info');
-  el.innerHTML = `<div class="pagehead"><h2>القنوات</h2></div><div class="card"><h3>بيانات تحطها في Meta for Developers</h3><label>Callback URL (Webhook) الخاص بمتجرك</label><input readonly dir="ltr" value="${esc(info.webhook_url)}" onclick="this.select()">${info.base_is_public ? '' : '<div class="hint" style="color:var(--warn)">⚠️ ده رابط محلي. ميتا محتاجة رابط https عام.</div>'}<label>Verify Token</label><input readonly dir="ltr" value="${esc(info.verify_code)}" onclick="this.select()"><div class="hint">خطوات الربط بالتفصيل في صفحة "دليل الربط" (docs/SETUP.md).</div></div><div id="form"></div>
+  const [info, ci] = await Promise.all([get('/channels/info'), get('/connect/info')]);
+  const linked = Object.fromEntries(ci.links.map((l) => [l.channel, l]));
+  const row = (c) => `<div class="row sp" style="padding:8px 0;border-top:1px solid var(--line)"><b>${CH_NAMES[c]}</b>${linked[c]
+    ? `<span><span class="tag ok">متوصل${linked[c].label ? ` · ${esc(linked[c].label)}` : ''}</span> <button class="ghost small" data-off="${c}">فصل</button></span>`
+    : (c === 'instagram' ? '<span class="muted">بيتربط مع ماسنجر لو الصفحة عليها حساب إنستجرام تجاري</span>' : `<button class="small" data-on="${c}">اربط ${CH_NAMES[c]}</button>`)}</div>`;
+  const quick = ci.available ? `<div class="card"><h3>الربط السريع</h3><div class="hint" style="margin:0 0 12px">اضغط، سجّل دخولك في نافذة ميتا، ووافق. مفيش توكنات تنسخها ولا تطبيق تعمله.</div>${['messenger', 'instagram', 'whatsapp'].map(row).join('')}<div id="qres" class="hint" style="margin-top:8px" role="status"></div></div>` : '';
+  el.innerHTML = `<div class="pagehead"><h2>القنوات</h2></div>${quick}
+  <details class="card" ${ci.available ? '' : 'open'}><summary style="cursor:pointer;font-weight:500">${ci.available ? 'ربط يدوي (متقدم)' : 'الربط اليدوي'}</summary>
+  <h3>بيانات تحطها في Meta for Developers</h3><label>Callback URL (Webhook) الخاص بمتجرك</label><input readonly dir="ltr" value="${esc(info.webhook_url)}" onclick="this.select()">${info.base_is_public ? '' : '<div class="hint" style="color:var(--warn)">⚠️ ده رابط محلي. ميتا محتاجة رابط https عام.</div>'}<label>Verify Token</label><input readonly dir="ltr" value="${esc(info.verify_code)}" onclick="this.select()"><div id="form"></div></details>
   <div class="card"><h3>اختبار الاتصال</h3><div class="row"><button class="ghost small" data-t="messenger">ماسنجر</button><button class="ghost small" data-t="instagram">إنستجرام</button><button class="ghost small" data-t="whatsapp">واتساب</button></div><div id="tres" class="hint" style="margin-top:8px"></div></div>`;
   await settingsForm($('#form', el), ['channels']);
   $$('[data-t]', el).forEach((b) => { b.onclick = async () => { const r = await post(`/channels/${b.dataset.t}/test`); $('#tres', el).innerHTML = r.ok ? `✅ شغالة: ${esc(JSON.stringify(r.info))}` : `❌ ${esc(r.error)}`; }; });
+  if (!ci.available) return;
+  const say = (m, bad) => { const r = $('#qres', el); r.textContent = m; r.style.color = bad ? 'var(--bad)' : ''; };
+  $$('[data-off]', el).forEach((b) => { b.onclick = async () => { if (!confirmBox(`فصل ${CH_NAMES[b.dataset.off]}؟ البوت هيبطل يرد على القناة دي.`)) return; await post('/connect/disconnect', { channel: b.dataset.off }); pages.channels(el); }; });
+
+  $('[data-on="messenger"]', el)?.addEventListener('click', async () => {
+    try {
+      await loadFB(ci.app_id, ci.graph_version);
+      say('في انتظار موافقتك في نافذة ميتا...');
+      const opts = { response_type: 'code', override_default_response_type: true };
+      if (ci.config_id_messenger) opts.config_id = ci.config_id_messenger;
+      else opts.scope = 'pages_show_list,pages_messaging,pages_manage_metadata,instagram_basic,instagram_manage_messages';
+      window.FB.login(async (r) => {
+        if (!r.authResponse?.code) return say('اتلغى الربط.', true);
+        try {
+          const { ticket, pages: list } = await post('/connect/pages', { code: r.authResponse.code });
+          const pick = async (page) => { const x = await post('/connect/page', { ticket, page_id: page.id }); toast(`اتربط ${x.messenger}${x.instagram ? ` و ${x.instagram}` : ''} ✓`); pages.channels(el); };
+          if (list.length === 1) return pick(list[0]);
+          const m = modal('اختار الصفحة', list.map((pg) => `<div class="row sp" style="padding:8px 0"><span>${esc(pg.name)}${pg.instagram ? ` <span class="tag">إنستجرام @${esc(pg.instagram.username || '')}</span>` : ''}</span><button class="small" data-pg="${esc(pg.id)}">اربط</button></div>`).join(''), {});
+          m.el.addEventListener('click', (e) => { const b = e.target.closest('[data-pg]'); if (b) { m.close(); pick(list.find((x) => x.id === b.dataset.pg)); } });
+        } catch (e) { say(e.message, true); }
+      }, opts);
+    } catch (e) { say(e.message, true); }
+  });
+
+  $('[data-on="whatsapp"]', el)?.addEventListener('click', async () => {
+    try {
+      if (!ci.config_id_whatsapp) return say('الربط السريع لواتساب لسه مش مفعّل من إدارة المنصة.', true);
+      await loadFB(ci.app_id, ci.graph_version);
+      let session = null;
+      const onMsg = (ev) => {
+        try { if (!new URL(ev.origin).hostname.endsWith('facebook.com')) return; const d = JSON.parse(ev.data); if (d.type === 'WA_EMBEDDED_SIGNUP' && d.event === 'FINISH') session = d.data; } catch { /* */ }
+      };
+      window.addEventListener('message', onMsg);
+      say('في انتظار موافقتك في نافذة ميتا...');
+      window.FB.login(async (r) => {
+        try {
+          if (!r.authResponse?.code) return say('اتلغى الربط.', true);
+          for (let i = 0; i < 30 && !session; i++) await new Promise((x) => setTimeout(x, 200)); // الرسالة بتوصل مع/بعد الكود
+          if (!session) return say('ميتا ما بعتتش بيانات الرقم. جرّب تاني.', true);
+          await post('/connect/whatsapp', { code: r.authResponse.code, waba_id: session.waba_id, phone_number_id: session.phone_number_id });
+          toast('اتربط واتساب ✓'); pages.channels(el);
+        } catch (e) { say(e.message, true); } finally { window.removeEventListener('message', onMsg); }
+      }, { config_id: ci.config_id_whatsapp, response_type: 'code', override_default_response_type: true, extras: { setup: {}, featureType: '', sessionInfoVersion: '3' } });
+    } catch (e) { say(e.message, true); }
+  });
 };
 
 /* --- الاشتراك والاستهلاك --- */

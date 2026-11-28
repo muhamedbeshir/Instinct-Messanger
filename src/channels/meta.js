@@ -9,7 +9,8 @@ import { emit } from '../events.js';
 import * as logger from '../logger.js';
 import { track } from '../platform.js';
 
-const graph = (p) => `https://graph.facebook.com/${getSetting('channels.graph_version', 'v21.0')}${p}`;
+import { graphUrl } from './graph.js';
+const graph = (p) => graphUrl(p, getSetting('channels.graph_version', 'v21.0'));
 
 /* ---------------- إرسال ---------------- */
 function tokenFor(channel) {
@@ -68,8 +69,8 @@ export async function fetchProfileName(channel, id) {
 }
 
 /* ---------------- استقبال ---------------- */
-export function verifySignature(rawBody, header) {
-  const secret = getSetting('channels.app_secret');
+export function verifySignature(rawBody, header, secretOverride) {
+  const secret = secretOverride ?? getSetting('channels.app_secret');
   if (!secret) return true; // لو مفيش App Secret متحققناش (نحذّر في صفحة الصحة)
   if (!header || !header.startsWith('sha256=')) return false;
   const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');

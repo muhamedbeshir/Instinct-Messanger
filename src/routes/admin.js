@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import * as auth from '../auth.js';
 import {
   pq, listPlans, getPlan, savePlan, getPlatformSettings, setPlatformSettings, tenantInfo, tenantById, invalidateTenant, deleteTenantRecord,
-  createTenant, usageOf, periodKey, audit, allTenantIds,
+  createTenant, usageOf, periodKey, audit, allTenantIds, metaConfig,
 } from '../platform.js';
 import { runInTenant, tenantDir } from '../tenancy.js';
 import { q, closeTenantDb, openTenantDb, updateSettings } from '../db.js';
@@ -136,11 +136,15 @@ admin.put('/plans/:id', (req, res) => {
 admin.get('/settings', (req, res) => {
   const s = JSON.parse(JSON.stringify(getPlatformSettings()));
   if (s.ai.api_key) s.ai.api_key = '__set__';
+  if (s.meta.app_secret) s.meta.app_secret = '__set__';
+  s.meta.verify_code = metaConfig().verify_code;
   res.json({ ...s, ai_status: platformAiStatus() });
 });
 admin.put('/settings', (req, res) => {
   const patch = JSON.parse(JSON.stringify(req.body || {}));
   if (patch.ai?.api_key === '__set__') delete patch.ai.api_key;
+  if (patch.meta?.app_secret === '__set__') delete patch.meta.app_secret;
+  if (patch.meta) delete patch.meta.verify_code;
   setPlatformSettings(patch);
   for (const id of allTenantIds()) invalidateTenant(id);
   audit(actor(req), null, 'platform.settings', Object.keys(patch));

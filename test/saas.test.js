@@ -223,6 +223,6 @@ test('الصفحات العامة: هبوط ولوحة المتجر ولوحة �
   const home = await raw.get('/'); assert.equal(home.status, 200); assert.match(home.data, /dir="rtl"/); assert.match(home.data, /\/app\/#\/signup/);
   assert.equal((await raw.get('/app/')).status, 200); assert.equal((await raw.get('/admin/')).status, 200);
   assert.equal((await raw.get('/shared/base.css')).status, 200); assert.equal((await raw.get('/assets/system.css')).status, 200);
-  assert.equal((await raw.get('/webhooks/meta')).status, 404);
+  assert.equal((await raw.get('/webhooks/meta')).status, 403); // مركزي: من غير كود تحقق مرفوض
   const hdr = await fetch(base + '/'); assert.equal(hdr.headers.get('x-frame-options'), 'DENY'); assert.equal(hdr.headers.get('x-content-type-options'), 'nosniff');
 });

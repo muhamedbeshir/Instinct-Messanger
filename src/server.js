@@ -16,7 +16,7 @@ import { handleWebhook, verifySignature, verifyChallenge } from './channels/meta
 import { notifyOrder, exportOrder, alertOwner } from './notify.js';
 import { startSourceScheduler } from './importer.js';
 import { getOrder } from './orders.js';
-import { tenantBySlug, tenantInfo } from './platform.js';
+import { tenantBySlug, tenantInfo, metaConfig, tenantForLink } from './platform.js';
 
 export function createApp() {
   const app = express();
@@ -35,6 +35,18 @@ export function createApp() {
     const tid = Number(req.params.tid);
     if (!Number.isInteger(tid) || tid < 1) return res.status(404).end();
     res.sendFile(path.basename(req.params.file), { root: path.join(tenantDir(tid), 'uploads'), maxAge: '7d', dotfiles: 'deny' }, (err) => { if (err && !res.headersSent) res.status(404).end(); });
+  });
+
+  // Webhook مركزي واحد (تطبيق ميتا المنصة): بيوزّع كل حدث على المتجر صاحب الصفحة/الحساب/رقم واتساب
+  app.get('/webhooks/meta', (req, res) => {
+    const m = metaConfig();
+    return req.query['hub.mode'] === 'subscribe' && m.verify_code && req.query['hub.verify_token'] === m.verify_code ? res.status(200).send(String(req.query['hub.challenge'])) : res.sendStatus(403);
+  });
+  app.post('/webhooks/meta', (req, res) => {
+    const m = metaConfig();
+    if (!m.app_secret || !verifySignature(req.rawBody || Buffer.from(''), req.get('x-hub-signature-256'), m.app_secret)) return res.sendStatus(401);
+    res.sendStatus(200);
+    routeCentralWebhook(req.body).catch((e) => logger.error('webhook', e.message, e));
   });
 
   // Meta webhook: لكل متجر رابط خاص بيه (/webhooks/meta/<slug>) وبياناته وتوكناته الخاصة
@@ -66,6 +78,22 @@ export function createApp() {
   app.get('/login', (req, res) => res.redirect('/app/'));
   app.use(express.static(path.join(ROOT, 'public'), { extensions: ['html'] }));
   return app;
+}
+
+/** يقسّم الحدث لكل متجر ويشغّله جوه سياقه. أي حساب مش مربوط بيتجاهل. */
+export async function routeCentralWebhook(body) {
+  const channel = { page: 'messenger', instagram: 'instagram', whatsapp_business_account: 'whatsapp' }[body?.object];
+  if (!channel) return;
+  for (const entry of body.entry || []) {
+    const parts = channel === 'whatsapp'
+      ? (entry.changes || []).map((ch) => ({ id: ch.value?.metadata?.phone_number_id, entry: { ...entry, changes: [ch] } }))
+      : [{ id: entry.id, entry }];
+    for (const part of parts) {
+      const tid = part.id ? tenantForLink(channel, part.id) : null;
+      if (tid == null) { logger.info('webhook', `حدث لحساب غير مربوط (${channel} ${part.id})`); continue; }
+      await runInTenant(tid, () => handleWebhook({ object: body.object, entry: [part.entry] }));
+    }
+  }
 }
 
 export function registerJobs() {

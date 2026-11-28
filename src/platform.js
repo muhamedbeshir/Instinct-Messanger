@@ -55,6 +55,10 @@ CREATE TABLE IF NOT EXISTS plogs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id INTEGER, level TEXT, scope TEXT, message TEXT, created_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS pset (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS channel_links (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id INTEGER NOT NULL, channel TEXT NOT NULL,
+  external_id TEXT NOT NULL, label TEXT DEFAULT '', created_at INTEGER NOT NULL, UNIQUE(channel, external_id)
+);
 `);
 
 export const pq = {
@@ -67,6 +71,7 @@ export const pq = {
 export const PLATFORM_DEFAULTS = {
   brand: { name: 'Instinct Messenger' },
   ai: { provider: 'auto', model: 'claude-sonnet-5-5', api_key: '', max_tokens: 1024, timeout_ms: 45000, allow_mock: false },
+  meta: { app_id: '', app_secret: '', verify_code: '', config_id_whatsapp: '', config_id_messenger: '', graph_version: 'v21.0' },
   signup: { open: true, default_plan: 'trial' },
   public_url: '',
   support: { email: '', whatsapp: '' },
@@ -216,3 +221,20 @@ export function platformLog(level, scope, message, tenantId = currentTenantId())
   } catch { /* */ }
 }
 export const allTenantIds = () => pq.all('SELECT id FROM tenants').map((r) => r.id);
+
+/* ---------------- الربط المركزي مع ميتا (Embedded Signup) ---------------- */
+export function metaConfig() {
+  const m = getPlatformSettings().meta;
+  if (!m.verify_code) { setPlatformSettings({ meta: { verify_code: 'im_' + crypto.randomBytes(8).toString('hex') } }); return getPlatformSettings().meta; }
+  return m;
+}
+export const metaAvailable = () => { const m = metaConfig(); return Boolean(m.app_id && m.app_secret); };
+/** يربط رقم صفحة/حساب/رقم واتساب بمتجر. لو كان مربوط بمتجر تاني بيرجع خطأ (مفيش خطف). */
+export function linkChannel(tenantId, channel, externalId, label = '') {
+  const cur = pq.get('SELECT * FROM channel_links WHERE channel=? AND external_id=?', channel, String(externalId));
+  if (cur && cur.tenant_id !== tenantId) throw new Error('الحساب ده مربوط بمتجر تاني على المنصة.');
+  if (!cur) pq.run('INSERT INTO channel_links(tenant_id,channel,external_id,label,created_at) VALUES(?,?,?,?,?)', tenantId, channel, String(externalId), label, now());
+}
+export const unlinkChannel = (tenantId, channel) => pq.run('DELETE FROM channel_links WHERE tenant_id=? AND channel=?', tenantId, channel);
+export const tenantForLink = (channel, externalId) => pq.get('SELECT tenant_id FROM channel_links WHERE channel=? AND external_id=?', channel, String(externalId))?.tenant_id ?? null;
+export const linksOf = (tenantId) => pq.all('SELECT channel, external_id, label FROM channel_links WHERE tenant_id=?', tenantId);

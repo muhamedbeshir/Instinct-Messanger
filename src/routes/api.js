@@ -18,6 +18,7 @@ import { listOrders, getOrder, updateOrder, ordersToCsv, ordersToXlsx } from '..
 import { learn, addKnowledge } from '../knowledge.js';
 import { deliver } from '../channels/index.js';
 import { testChannel } from '../channels/meta.js';
+import * as connect from '../channels/connect.js';
 import { buildSystem } from '../ai/prompt.js';
 import { providerName } from '../ai/agent.js';
 import { mimeFromName } from '../images.js';
@@ -342,6 +343,14 @@ api.get('/channels/info', (req, res) => {
   const base = String(ps.public_url || getSetting('channels.public_base_url') || '').replace(/\/$/, '') || `${req.protocol}://${req.get('host')}`;
   res.json({ webhook_url: `${base}/webhooks/meta/${req.tenant.slug}`, verify_code: getSetting('channels.verify_code'), base_is_public: Boolean(ps.public_url || getSetting('channels.public_base_url')), platform_manages_url: Boolean(ps.public_url) });
 });
+/* ربط القنوات بزرار (Embedded Signup): التوكنات بتفضل على السيرفر */
+api.get('/connect/info', (req, res) => res.json(connect.connectInfo()));
+const wrap = (fn) => async (req, res) => { try { res.json(await fn(req)); } catch (e) { res.status(400).json({ error: e.message }); } };
+api.post('/connect/pages', wrap((req) => connect.pagesFromCode(String(req.body?.code || ''))));
+api.post('/connect/page', wrap((req) => connect.connectPage({ ticket: req.body?.ticket, page_id: req.body?.page_id, with_instagram: req.body?.with_instagram !== false })));
+api.post('/connect/whatsapp', wrap((req) => connect.connectWhatsapp(req.body || {})));
+api.post('/connect/disconnect', wrap((req) => { connect.disconnect(String(req.body?.channel || '')); return { ok: true }; }));
+
 api.post('/channels/:name/test', async (req, res) => res.json(await testChannel(req.params.name)));
 
 /* ---------------- أحداث لحظية (SSE) ---------------- */

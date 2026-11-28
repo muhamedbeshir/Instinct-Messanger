@@ -109,6 +109,10 @@ pages.settings = async (el) => {
     <div><label>الموديل</label><input id="a_m" dir="ltr" value="${esc(ai.model)}"></div><div><label>مفتاح Claude (Anthropic API Key)</label><input id="a_k" type="password" autocomplete="new-password" value="${ai.api_key === '__set__' ? '__set__' : ''}" placeholder="${ai.api_key === '__set__' ? 'محفوظ' : 'sk-ant-...'}"></div>
     <div><label>أقصى طول رد (tokens)</label><input id="a_t" type="number" value="${ai.max_tokens}"></div><div><label>مهلة الرد (ms)</label><input id="a_o" type="number" value="${ai.timeout_ms}"></div></div>
     <label class="chk"><input type="checkbox" id="a_mock" ${ai.allow_mock ? 'checked' : ''}> اسمح بالوضع التجريبي في الإنتاج (مش مفضّل: بيرد برد مبسّط على عملاء حقيقيين)</label></div>
+  <div class="card"><h3>الربط المركزي مع ميتا (Embedded Signup)</h3><div class="hint" style="margin:0 0 8px">تطبيق ميتا واحد للمنصة كلها. العميل بيربط بزرار واحد من غير ما يعمل تطبيق. لازم تطبيقك يكون معتمد (Tech Provider + App Review). من غير القيم دي، العملاء بيستخدموا الربط اليدوي.</div>
+    <div class="grid g2"><div><label>App ID</label><input id="m_i" dir="ltr" value="${esc(s.meta.app_id)}"></div><div><label>App Secret</label><input id="m_s" type="password" autocomplete="new-password" value="${s.meta.app_secret === '__set__' ? '__set__' : ''}" placeholder="${s.meta.app_secret === '__set__' ? 'محفوظ' : ''}"></div>
+    <div><label>Config ID لواتساب (Embedded Signup)</label><input id="m_w" dir="ltr" value="${esc(s.meta.config_id_whatsapp)}"></div><div><label>Config ID لماسنجر/إنستجرام (Facebook Login for Business)</label><input id="m_m" dir="ltr" value="${esc(s.meta.config_id_messenger)}"></div></div>
+    <label>Callback URL للـ Webhook (حطه مرة واحدة في تطبيق ميتا)</label><input readonly dir="ltr" value="${esc((s.public_url || location.origin).replace(/\/$/, ''))}/webhooks/meta" onclick="this.select()"><label>Verify Token</label><input readonly dir="ltr" value="${esc(s.meta.verify_code)}" onclick="this.select()"></div>
   <div class="card"><h3>التسجيل والعلامة</h3><div class="grid g2"><div><label>اسم المنصة</label><input id="b_n" value="${esc(s.brand.name)}"></div><div><label>الباقة الافتراضية للتسجيل</label><select id="s_p">${plans.map((p) => `<option value="${esc(p.slug)}" ${p.slug === s.signup.default_plan ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div></div>
     <label class="chk"><input type="checkbox" id="s_o" ${s.signup.open ? 'checked' : ''}> التسجيل الذاتي مفتوح</label>
     <label>الرابط العام للمنصة (https) — بيستخدم في صور المنتجات وروابط الـ webhook</label><input id="pu" dir="ltr" value="${esc(s.public_url)}" placeholder="https://app.example.com"></div>
@@ -120,6 +124,7 @@ pages.settings = async (el) => {
     const v = (i) => $(i, el);
     const key = v('#a_k').value;
     await put('/admin/settings', { ai: { provider: v('#a_p').value, model: v('#a_m').value, ...(key && key !== '__set__' ? { api_key: key } : {}), max_tokens: Number(v('#a_t').value), timeout_ms: Number(v('#a_o').value), allow_mock: v('#a_mock').checked },
+      meta: { app_id: v('#m_i').value.trim(), ...(v('#m_s').value && v('#m_s').value !== '__set__' ? { app_secret: v('#m_s').value.trim() } : {}), config_id_whatsapp: v('#m_w').value.trim(), config_id_messenger: v('#m_m').value.trim() },
       brand: { name: v('#b_n').value }, signup: { open: v('#s_o').checked, default_plan: v('#s_p').value }, public_url: v('#pu').value.trim(), support: { email: v('#su_e').value, whatsapp: v('#su_w').value }, payment_instructions: v('#pi').value, announcement: { text: v('#an_t').value, level: v('#an_l').value } });
     toast('اتحفظ ✓'); pages.settings(el);
   };
